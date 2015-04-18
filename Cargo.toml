@@ -1,0 +1,14 @@
+[package]
+name = "pnacl-clang-driver"
+version = "0.0.0"
+repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
+license = "MIT"
+build = "src/build.rs"
+
+[[bin]]
+name = "driver-clang"
+path = "src/bin/main.rs"
+
+[build-dependencies]
+regex = "0.1"
+regex_macros = "0.1"
