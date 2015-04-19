@@ -691,6 +691,8 @@ BASIC OPTIONS:
                 self.set_output(&arg[2..]);
             } else if arg == "-v" {
                 self.set_verbose();
+            } else if arg == "-g" {
+                self.add_driver_arg(arg);
             } else if !&arg[..].starts_with("-") || arg == "-" {
                 self.add_input(arg, file_lang.clone());
             } else {
