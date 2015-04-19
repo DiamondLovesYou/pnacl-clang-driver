@@ -91,7 +91,7 @@ fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
 #[cfg(any(target_os = "nacl", test))]
 fn get_inc_path() -> PathBuf {
     static INCLUDE_ROOT: &'static str = "/include";
-    Path::new(INCUDE_ROOT)
+    Path::new(INCLUDE_ROOT)
         .to_path_buf()
 }
 
