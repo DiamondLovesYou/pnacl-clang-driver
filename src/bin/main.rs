@@ -122,8 +122,6 @@ impl DriverMode {
 
         let cer: &str = current_exe.as_ref();
 
-        assert!(cer.ends_with(EXE_SUFFIX));
-
         let cer = &cer[..cer.len() - EXE_SUFFIX.len()];
 
         if cer.ends_with("clang") {
