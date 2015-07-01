@@ -1,4 +1,3 @@
-#![crate_name = "driver_clang"]
 
 #![allow(dead_code)]
 
@@ -10,83 +9,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-enum EhMode {
-    Off,
-    SjLj,
-}
+use util::{EhMode, OptimizationGoal};
+use util::{need_nacl_toolchain, get_bin_path};
 
-impl Default for EhMode {
-    fn default() -> EhMode {
-        EhMode::Off
-    }
-}
-
-#[allow(dead_code)]
-fn need_nacl_toolchain() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    fn host_os() -> &'static str { "linux" }
-    #[cfg(target_os = "macos")]
-    fn host_os() -> &'static str { "mac" }
-    #[cfg(target_os = "windows")]
-    fn host_os() -> &'static str { "win" }
-    #[cfg(all(not(target_os = "linux"),
-              not(target_os = "macos"),
-              not(target_os = "windows")))]
-    fn host_os() -> &'static str { unimplemented!() }
-
-    match var_os("NACL_SDK_ROOT")
-        .or_else(|| {
-            option_env!("NACL_SDK_ROOT")
-                .map(|f| From::from(f) )
-        })
-    {
-        Some(sdk) => {
-            let tc = format!("{}_pnacl", host_os());
-            Path::new(&sdk)
-                .join("toolchain")
-                .join(&tc[..])
-                .to_path_buf()
-        },
-        None => panic!("need `NACL_SDK_ROOT`"),
-    }
-}
-
-#[cfg(test)]
-fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
-    assert!(bin.as_ref().is_relative());
-    bin.as_ref().to_path_buf()
-}
-#[cfg(all(target_os = "nacl", not(test)))]
-fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
-    use std::env::consts::EXE_SUFFIX;
-    assert!(bin.as_ref().is_relative());
-    let prefix = if bin.as_ref().starts_with("clang") {
-        "real-"
-    } else {
-        ""
-    };
-    let bin = format!("{}{}{}",
-                      prefix,
-                      bin.as_ref().display(),
-                      EXE_SUFFIX);
-    Path::new("/bin")
-        .join(&bin[..])
-        .to_path_buf()
-}
-#[cfg(all(not(target_os = "nacl"), not(test)))]
-fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
-    use std::env::consts::EXE_SUFFIX;
-
-    assert!(bin.as_ref().is_relative());
-
-    let mut toolchain = need_nacl_toolchain();
-    toolchain.push("bin");
-
-    let bin = format!("{}{}", bin.as_ref().display(),
-                      EXE_SUFFIX);
-    toolchain.push(&bin[..]);
-    toolchain
-}
+extern crate util;
 
 #[cfg(any(target_os = "nacl", test))]
 fn get_inc_path() -> PathBuf {
@@ -212,7 +138,7 @@ struct Invocation {
     gcc_mode: Option<GccMode>,
     eh_mode: EhMode,
 
-    opt_level: u8,
+    optimization: OptimizationGoal,
 
     no_default_libs: bool,
     no_std_lib: bool,
@@ -241,7 +167,7 @@ impl Invocation {
             gcc_mode: Default::default(),
             eh_mode: Default::default(),
 
-            opt_level: 0,
+            optimization: Default::default(),
 
             no_default_libs: false,
             no_std_lib: false,
@@ -263,6 +189,8 @@ impl Invocation {
 
     fn print_version(&self) {
         use std::process::Stdio;
+        use util;
+
         let mut clang_ver = self.clang_base_cmd();
         clang_ver.stdout(Stdio::piped());
         self.clang_add_std_args(&mut clang_ver);
@@ -275,7 +203,7 @@ impl Invocation {
         let out = clang_ver.output().unwrap();
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut add_nacl_version = Some(include_str!(concat!(env!("OUT_DIR"), "/REV")));
+        let mut add_nacl_version = Some(util::SDK_VERSION);
         for line in stdout
             .lines_any()
             .map(|l| {
@@ -452,8 +380,8 @@ BASIC OPTIONS:
     }
 
     fn clang_add_std_args(&self, cmd: &mut Command) {
-        assert!(self.opt_level <= 3);
-        cmd.arg(format!("-O{}", self.opt_level));
+        self.optimization.check();
+        cmd.arg(format!("-O{}", self.optimization));
         cmd.args(&["-fno-vectorize",
                    "-fno-slp-vectorize",
                    "-fno-common",
@@ -572,15 +500,7 @@ BASIC OPTIONS:
     fn process_args<'a, T>(&mut self, mut raw_args: T) -> bool
         where T: Iterator, <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>,
     {
-
-        fn expect_next<'a, T>(args: &mut T) -> <T as Iterator>::Item
-            where T: Iterator, <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>
-        {
-            let arg = args.next();
-            if arg.is_none() { panic!("expected another argument"); }
-            arg.unwrap()
-        }
-
+        use util::expect_next;
         let mut file_lang;
 
         loop {
@@ -627,7 +547,7 @@ BASIC OPTIONS:
                 self.eh_mode = EhMode::SjLj;
             } else if arg.starts_with("--pnacl-exceptions=") {
                 if &arg[19..] == "none" {
-                    self.eh_mode = EhMode::Off;
+                    self.eh_mode = EhMode::None;
                 } else if &arg[19..] == "sjlj" {
                     self.eh_mode = EhMode::SjLj;
                 } else {

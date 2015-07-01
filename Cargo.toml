@@ -1,14 +1,29 @@
 [package]
-name = "pnacl-clang-driver"
+name = "pnacl-drivers"
 version = "0.0.0"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 license = "MIT"
-build = "src/build.rs"
 
 [[bin]]
-name = "driver-clang"
-path = "src/bin/main.rs"
+name = "pnacl-clang"
+path = "src/clang/main.rs"
 
-[build-dependencies]
-regex = "0.1"
-regex_macros = "0.1"
+[[bin]]
+name = "pnacl-ld"
+path = "src/ld/main.rs"
+
+[[bin]]
+name = "pnacl-opt"
+path = "src/opt/main.rs"
+
+[dependencies.pnacl-util]
+path = "src/libs/util"
+
+[dependencies.pnacl-clang-driver]
+path = "src/libs/clang"
+
+[dependencies.pnacl-ld-driver]
+path = "src/libs/ld"
+
+[dependencies.pnacl-opt-driver]
+path = "src/libs/opt"
