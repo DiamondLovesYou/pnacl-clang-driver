@@ -1,11 +1,30 @@
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use filetype;
 
 /// Tool for linkers, like a linker script parser.
 
-pub fn parse_linker_script_file<T: AsRef<Path>>(path: T) -> Option<Vec<String>> {
+#[derive(Clone, Debug)]
+pub enum Input {
+    Library(bool, PathBuf, AllowedTypes),
+    File(PathBuf),
+    Flag(String),
+}
+
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Input::Library(false, ref p, _) => write!(f, "-l{}", p.display()),
+            &Input::Library(true, ref p, _) => write!(f, "-l:{}", p.display()),
+            &Input::File(ref p) => write!(f, "{}", p.display()),
+            &Input::Flag(ref flag) => write!(f, "{}", flag),
+        }
+    }
+}
+
+pub fn parse_linker_script_file<T: AsRef<Path>>(path: T) -> Option<Vec<Input>> {
     use std::fs::File;
     use std::io::Read;
 
@@ -24,7 +43,7 @@ pub fn parse_linker_script_file<T: AsRef<Path>>(path: T) -> Option<Vec<String>> 
         })
 }
 
-pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<String>> {
+pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
 
     let mut ret = Vec::new();
     let mut stack = Vec::new();
@@ -77,7 +96,7 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<String>> {
                     return None;
                 }
             } else if curr == "GROUP" {
-                ret.push("--start-group".to_string());
+                ret.push(Input::Flag("--start-group".to_string()));
                 stack.push(Stack::Group);
                 if iter.next() != Some("(") {
                     return None;
@@ -99,10 +118,10 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<String>> {
             if curr == ")" {
                 match stack.pop() {
                     Some(Stack::AsNeeded) => {
-                        ret.push("--no-as-needed".to_string());
+                        ret.push(Input::Flag("--no-as-needed".to_string()));
                     },
                     Some(Stack::Group) => {
-                        ret.push("--end-group".to_string());
+                        ret.push(Input::Flag("--end-group".to_string()));
                     },
                     None => { return None; },
                     _ => {},
@@ -111,21 +130,20 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<String>> {
                 if iter.next() != Some("(") {
                     return None;
                 }
-                ret.push("--as-needed".to_string());
+                ret.push(Input::Flag("--as-needed".to_string()));
                 stack.push(Stack::AsNeeded);
 
             } else if stack.last() == Some(&Stack::OutputFormat) {
                 // ignore
             } else if stack.last() == Some(&Stack::Extern) {
-                ret.push(format!("--undefined={}",
-                                 curr));
+                ret.push(Input::Flag(format!("--undefined={}", curr)));
             } else {
-                ret.push(format!("-l:{}", curr));
+                ret.push(Input::Library(true, From::from(curr), AllowedTypes::Any));
             }
         }
     }
 }
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AllowedTypes {
     Any,
     Bitcode,
@@ -141,24 +159,11 @@ impl AllowedTypes {
     }
 }
 
-pub fn expand_inputs<T>(inputs: T, search: &[PathBuf], static_only: bool,
-                        allowed_types: AllowedTypes) -> Result<Vec<PathBuf>, String>
-    where T: Iterator, <T as Iterator>::Item: AsRef<Path>,
-{
-    fn is_flag<T: AsRef<Path>>(v: T) -> bool {
-        v.as_ref().starts_with("-") && !is_lib(&v)
-    }
-    fn is_lib<T: AsRef<Path>>(v: T) -> bool {
-        v.as_ref().starts_with("-l")
-    }
-    fn is_absolute<T: AsRef<Path>>(v: T) -> bool {
-        debug_assert!(is_lib(&v));
-        v.as_ref().starts_with("-l:")
-    }
+pub fn expand_input(input: Input, search: &[PathBuf],
+                    static_only: bool) -> Result<Vec<Input>, String> {
 
     fn find_file<T: AsRef<Path>>(name: T, search: &[PathBuf],
-                                 allowed_types: AllowedTypes) -> Option<PathBuf>
-    {
+                                 allowed_types: AllowedTypes) -> Option<PathBuf> {
         use std::fs::PathExt;
         for dir in search.iter() {
             let full = dir.join(&name);
@@ -173,17 +178,13 @@ pub fn expand_inputs<T>(inputs: T, search: &[PathBuf], static_only: bool,
 
     let mut ret = Vec::new();
 
-    for f in inputs {
-        let r = if is_flag(&f) {
-            f.as_ref().to_path_buf()
-        } else if is_lib(&f) {
-            let f_str = try!(f.as_ref().to_str().ok_or("expected utf8 paths"));
-            let mut name = &f_str[2..];
-            let chain = if is_absolute(&f) {
-                name = &f_str[3..];
-                find_file(&f_str[3..], search, allowed_types)
+    let r = match input {
+        Input::Flag(f) => Input::Flag(f),
+        Input::Library(is_absolute, path, allowed_types) => {
+            let chain = if is_absolute {
+                find_file(&path, search, allowed_types)
                     .or_else(|| {
-                        if name == "libpnacl_irt_shim.a" {
+                        if path == From::from("libpnacl_irt_shim.a") {
                             find_file("libpnacl_irt_shim_dummy.a", search,
                                       allowed_types)
                         } else {
@@ -191,55 +192,59 @@ pub fn expand_inputs<T>(inputs: T, search: &[PathBuf], static_only: bool,
                         }
                     })
             } else {
-                let shared = format!("lib{}.so",
-                                     &f_str[2..]);
-                find_file(shared, search, allowed_types)
-                     .or_else(|| {
-                         find_file(format!("lib{}.a",
-                                           &f_str[2..]),
-                                   search, allowed_types)
-                     })
+                find_file(format!("lib{}.so", path.display()), search, allowed_types)
+                    .or_else(|| {
+                        find_file(format!("lib{}.a", path.display()), search,
+                                  allowed_types)
+                    })
             };
 
-            let chain = chain.or_else(|| {
-                if name == "pthread" {
-                    find_file("libpthread_private.so", search, allowed_types)
-                        .or_else(|| {
-                            find_file("libpthread_private.a", search,
-                                      allowed_types)
-                        })
-                } else {
-                    None
-                }
-            });
+            let chain = chain
+                .or_else(|| {
+                    if path == From::from("pthread") {
+                        find_file("libpthread_private.so", search, allowed_types)
+                            .or_else(|| find_file("libpthread_private.a", search, allowed_types) )
+
+                    } else {
+                        None
+                    }
+                });
 
             match chain {
-                Some(p) => p,
+                Some(p) => {
+                    let t = if !filetype::is_file_native(&p) {
+                        AllowedTypes::Bitcode
+                    } else {
+                        AllowedTypes::Native
+                    };
+                    Input::Library(true, p, t)
+                },
                 None => {
-                    return Err(format!("`{}` not found",
-                                       f_str));
+                    return Err(format!("`-l{}{}` not found",
+                                       if is_absolute { ":" } else { "" },
+                                       path.display()));
                 },
             }
-        } else if filetype::could_be_linker_script(&f) {
-            if let Some(expanded) = parse_linker_script_file(&f) {
-                let expanded = try!(expand_inputs(expanded.into_iter(),
-                                                  search,
-                                                  static_only,
-                                                  AllowedTypes::Any));
-                for arg in expanded.into_iter() {
-                    ret.push(From::from(arg));
+        },
+        Input::File(path) => {
+            if filetype::could_be_linker_script(&path) {
+                if let Some(expanded) = parse_linker_script_file(&path) {
+                    for arg in expanded.into_iter() {
+                        ret.push(try!(expand_input(expanded,
+                                                   search,
+                                                   static_only)));
+                    }
+                    return Ok(ret);
+                } else {
+                    Input::File(path)
                 }
-                continue;
             } else {
-                f.as_ref().to_path_buf()
+                Input::File(path)
             }
-        } else {
-            f.as_ref().to_path_buf()
-        };
+        },
+    };
 
-        ret.push(r);
-    }
-
+    ret.push(r);
 
     Ok(ret)
 }

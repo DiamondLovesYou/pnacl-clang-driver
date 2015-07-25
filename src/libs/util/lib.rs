@@ -10,6 +10,7 @@
 #![plugin(regex_macros)]
 
 use std::fmt;
+use std::io::{Write};
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -484,16 +485,31 @@ impl CommandQueue {
 
 /// A function to call if the associated regex was a match. Return `Err` if
 /// there was an error parsing the captured regex.
-pub type ToolArgActionFn<This> = fn(&mut This, regex::Captures) ->
+/// The second param indicates whether the argument matched the single or split
+/// forms. True for single.
+pub type ToolArgActionFn<This> = fn(&mut This, bool, regex::Captures) ->
     Result<(), String>;
 pub type ToolArgAction<This> = Option<ToolArgActionFn<This>>;
 
 pub struct ToolArg<This> {
     pub single: Option<regex::Regex>,
-    pub split: Option<&'static [regex::Regex]>, // Note there is no way to match on the next arg.
+    pub split: Option<regex::Regex>, // Note there is no way to match on the next arg.
 
     pub action: ToolArgAction<This>,
 }
+
+impl<This> fmt::Debug for ToolArg<This> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let action_msg = if self.action.is_some() {
+            "Some(..)"
+        } else {
+            "None"
+        };
+        write!(f, "ToolArg {{ single: `{:?}`, split: `{:?}`, action: `{}` }}",
+               self.single, self.split, action_msg)
+    }
+}
+
 impl<This> ToolArg<This> {
     pub fn check<'a, T>(&self,
                         this: &mut This,
@@ -515,15 +531,14 @@ impl<This> ToolArg<This> {
                     self.single.as_ref().unwrap().is_match(first_arg.as_ref())
                 {
                     Some(Ok(()))
-                } else if self.split.is_some() &&
-                    self.split.unwrap().iter().any(|r| r.is_match(first_arg.as_ref()) )
+                } else if self.split.as_ref()
+                    .map(|r| r.is_match(first_arg.as_ref()) )
+                    .unwrap_or(false)
                 {
                     assert!(args.next().is_some());
                     if args.peek().is_none() {
                         Some(Err(format!("`{}` expects another argument",
-                                         self.split.unwrap().iter().find(|r| {
-                                             r.is_match(first_arg.as_ref())
-                                         }).unwrap())))
+                                         self.split.as_ref().unwrap())))
                     } else {
                         *count += 1;
                         Some(Ok(()))
@@ -537,12 +552,13 @@ impl<This> ToolArg<This> {
                     .as_ref()
                     .and_then(|s| s.captures(first_arg.as_ref()) )
                     .map(|capture| {
-                        action(this, capture)
+                        action(this, true, capture)
                     });
                 if match_.is_some() {
                     match_
-                } else if self.split.is_some() &&
-                    self.split.unwrap().iter().any(|r| r.is_match(first_arg.as_ref()) )
+                } else if self.split.as_ref()
+                    .map(|r| r.is_match(first_arg.as_ref()) )
+                    .unwrap_or(false)
                 {
                     // This is so we can capture the next arg:
                     static SECOND_ARG: regex::Regex = regex!("(.+)");
@@ -550,13 +566,11 @@ impl<This> ToolArg<This> {
 
                     if args.peek().is_none() {
                         Some(Err(format!("`{}` expects another argument",
-                                         self.split.as_ref().unwrap().iter().find(|r| {
-                                             r.is_match(first_arg.as_ref())
-                                         }).unwrap())))
+                                         self.split.as_ref().unwrap())))
                     } else {
                         let cap = SECOND_ARG.captures(args.peek().unwrap().as_ref())
                             .unwrap();
-                        let action_result = action(this, cap);
+                        let action_result = action(this, false, cap);
                         *count += 1;
                         Some(action_result)
                     }
@@ -576,17 +590,17 @@ impl<This> ToolArg<This> {
 }
 
 // This is an array of arrays so multiple global arg arrays can be glued together.
-pub type ToolArgs<This> = &'static [&'static [&'static ToolArg<This>]];
+pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
 
 #[macro_export] macro_rules! tool_argument(
     ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
-      fn $fn_name:ident($this:ident, $cap:ident) $fn_body:block) => {
+      fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
         static $name: ::util::ToolArg<$ty> = ::util::ToolArg {
             single: Some(regex!($single_regex)),
             split: $split,
             action: Some($fn_name as util::ToolArgActionFn<$ty>),
         };
-        fn $fn_name($this: &mut $ty, $cap: ::regex::Captures) ->
+        fn $fn_name($this: &mut $ty, $single: bool, $cap: ::regex::Captures) ->
             ::std::result::Result<(), ::std::string::String>
         {
             $fn_body
@@ -596,6 +610,113 @@ pub type ToolArgs<This> = &'static [&'static [&'static ToolArg<This>]];
         static $name: ::util::ToolArg<$ty> = ::util::ToolArg {
             single: Some(regex!($single_regex)),
             split: $split,
+            action: None,
+        };
+    }
+    );
+
+#[macro_export] macro_rules! argument(
+    (impl $name:ident where { Some($single:expr), None } for $this:ty {
+        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+    }) => (
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  None,
+
+            action: Some($fn_name as util::ToolArgActionFn<$this>),
+        };
+        #[allow(unreachable_code)]
+        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
+            ::std::result::Result<(), ::std::string::String>
+        {
+            $fn_body;
+            Ok(())
+        }
+    );
+    (impl $name:ident where { None, Some($split:expr) } for $this:ty {
+        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+    }) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: None,
+            split:  Some(regex!($split)),
+
+            action: Some($fn_name as util::ToolArgActionFn<$this>),
+        };
+        #[allow(unreachable_code)]
+        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
+            ::std::result::Result<(), ::std::string::String>
+        {
+            $fn_body;
+            Ok(())
+        }
+    };
+    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty {
+        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+    }) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  Some(regex!($split)),
+
+            action: Some($fn_name as util::ToolArgActionFn<$this>),
+        };
+        #[allow(unreachable_code)]
+        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
+            ::std::result::Result<(), ::std::string::String>
+        {
+            $fn_body;
+            Ok(())
+        }
+    };
+
+
+
+    (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  None,
+
+            action: Some($fn_name as ::util::ToolArgActionFn<$this>),
+        };
+    };
+    (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: None,
+            split:  Some(regex!($split)),
+
+            action: Some($fn_name as ::util::ToolArgActionFn<$this>),
+        };
+    };
+    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  Some(regex!($split)),
+
+            action: Some($fn_name as ::util::ToolArgActionFn<$this>),
+        };
+    };
+
+
+    (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  None,
+
+            action: None,
+        };
+    };
+    (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: None,
+            split:  Some(regex!($split)),
+
+            action: None,
+        };
+    };
+    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
+        static $name: ::util::ToolArg<$this> = ::util::ToolArg {
+            single: Some(regex!($single)),
+            split:  Some(regex!($split)),
+
             action: None,
         };
     }
@@ -636,6 +757,7 @@ pub fn process_invocation_args<T: ToolInvocation + 'static>(invocation: &mut T,
     let mut iteration = 0;
     let mut used: Vec<usize> = Vec::new();
     'main: loop {
+        println!("iteration `{}`", iteration);
         let next_args = invocation.args(iteration);
 
         debug_assert!(iteration != 0 || next_args.is_some());
@@ -651,20 +773,22 @@ pub fn process_invocation_args<T: ToolInvocation + 'static>(invocation: &mut T,
             let mut program_args_iter = program_args.iter()
                 .map(|(_, arg)| arg )
                 .peekable();
+            'outer: loop {
+                if program_args_iter.peek().is_none() { break 'outer; }
+                let current_arg = program_args_iter.peek().unwrap().to_string();
+                println!("current_arg `{}`...", current_arg);
+                'inner: for accepted_arg in next_args.iter() {
 
-            'outer: for args in next_args.iter() {
-                for accepted_arg in args.iter() {
-                    if program_args_iter.peek().is_none() { break 'outer; }
+                    println!("checking: {:?}", accepted_arg);
                     let mut args_used = 0;
-                    let current_arg = program_args_iter.peek().unwrap().to_string();
+
                     let check = accepted_arg.check(invocation,
                                                    &mut program_args_iter,
                                                    &mut args_used);
                     match check {
-                        None => {
-                            program_arg_id += 1;
-                        },
+                        None => { },
                         Some(res) => {
+                            println!("match!");
                             debug_assert!(args_used != 0);
                             loop {
                                 if args_used == 0 { break; }
@@ -677,10 +801,16 @@ pub fn process_invocation_args<T: ToolInvocation + 'static>(invocation: &mut T,
 
                             if let Err(msg) = res {
                                 errors.push((current_arg, msg));
+                                break;
                             }
+
+                            continue 'outer;
                         },
                     }
                 }
+
+                program_args_iter.next();
+                program_arg_id += 1;
             }
         }
 
@@ -702,6 +832,7 @@ pub fn process_invocation_args<T: ToolInvocation + 'static>(invocation: &mut T,
 
         try!(invocation.check_state(iteration));
 
+        println!("used `{:?}`", used);
         for used in used.drain(RangeFull) {
             program_args.remove(&used);
         }
@@ -709,12 +840,14 @@ pub fn process_invocation_args<T: ToolInvocation + 'static>(invocation: &mut T,
         iteration += 1;
     }
 
-    // TODO(rdiamond): unused args?
+    println!("{:?}", program_args);
 
     Ok(())
 }
 
-pub fn main_inner<T: ToolInvocation + 'static>() -> Result<(), String> {
+pub fn main_inner<T>() -> Result<(), String>
+    where T: ToolInvocation + 'static,
+{
     use std::env;
 
     let mut verbose = false;
@@ -754,8 +887,10 @@ pub fn main_inner<T: ToolInvocation + 'static>() -> Result<(), String> {
     commands.run_all()
 }
 
-pub fn main<T: ToolInvocation + 'static>() -> Result<(), i32> {
-    use std::io::{stdout, Write};
+pub fn main<T>(outs: Option<(&mut Write, &mut Write)>) -> Result<(), i32>
+    where T: ToolInvocation + 'static,
+{
+    use std::io::{stdout, stderr};
     use std::thread::catch_panic;
 
     #[cfg(test)]
@@ -767,21 +902,28 @@ pub fn main<T: ToolInvocation + 'static>() -> Result<(), i32> {
         ::std::process::exit(code);
     }
 
+    let mut stdout = stdout();
+    let mut stderr = stderr();
+
+    let (_, err) = outs.unwrap_or((&mut stdout, &mut stderr));
+
     match catch_panic(main_inner::<T>) {
         Ok(Err(msg)) => {
-            write!(stdout(),
+            write!(err,
                    "{}", msg)
                 .unwrap();
             if !msg.ends_with("\n") {
-                writeln!(stdout(), "").unwrap();
+                writeln!(err, "").unwrap();
             }
 
             test_safe_exit(1)
         },
         Ok(Ok(ok)) => Ok(ok),
         Err(..) => {
-            println!("Woa! It looks like something bad happened! :(");
-            println!("Please let us know by filling a bug at https://crbug.com");
+            writeln!(err, "Woa! It looks like something bad happened! :(")
+                .unwrap();
+            writeln!(err, "Please let us know by filling a bug at https://crbug.com")
+                .unwrap();
 
             test_safe_exit(127)
         },
@@ -828,10 +970,16 @@ fn main_crash_test() {
         }
     }
 
-    let sink = Arc::new(Mutex::new(Cursor::new(Vec::new())));
-    io::set_print(box Sink(sink.clone()));
-    assert_eq!(main::<Panic>(), Err(127));
-    let stderr = sink.lock().unwrap().get_ref().clone();
+    let out = Arc::new(Mutex::new(Cursor::new(Vec::new())));
+    let err = Arc::new(Mutex::new(Cursor::new(Vec::new())));
+
+
+    {
+        let mut out = Sink(out.clone());
+        let mut err = Sink(err.clone());
+        assert_eq!(main::<Panic>(Some((&mut out, &mut err))), Err(127));
+    }
+    let stderr = err.lock().unwrap().get_ref().clone();
     let str = String::from_utf8(stderr).unwrap();
     println!("{}", str);
     assert!(str.contains("crbug"));

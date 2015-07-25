@@ -1,10 +1,13 @@
 #![feature(plugin)]
 #![plugin(regex_macros)]
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process;
 
 use util::{Arch, CommandQueue};
+
+pub use util::ldtools::Input;
 
 extern crate regex;
 #[macro_use] extern crate util;
@@ -66,8 +69,8 @@ const ZEROCOST_UNRESOLVED: &'static [&'static str] =
       ];
 
 const SPECIAL_LIBS: &'static [(&'static str, (&'static str, bool))] =
-    &[("-lnacl", ("-lnacl_sys_private", true)),
-      ("-lpthread", ("-lpthread_private", false)),
+    &[("-lnacl", ("nacl_sys_private", true)),
+      ("-lpthread", ("pthread_private", false)),
       ];
 
 #[derive(Clone, Debug)]
@@ -78,6 +81,7 @@ pub struct Invocation {
     pub run_passes_separately: bool,
     pub relocatable: bool,
     pub use_stdlib: bool,
+    pub use_defaultlibs: bool,
     pub pic: bool,
     pub allow_nexe_build_id: bool,
     pub static_: bool,
@@ -92,8 +96,8 @@ pub struct Invocation {
 
     pub disabled_passes: Vec<String>,
 
-    bitcode_inputs: Vec<PathBuf>,
-    native_inputs: Vec<PathBuf>,
+    bitcode_inputs: Vec<Input>,
+    native_inputs: Vec<Input>,
     has_native_inputs: bool,
     has_bitcode_inputs: bool,
 
@@ -121,6 +125,7 @@ impl Default for Invocation {
             run_passes_separately: false,
             relocatable: false,
             use_stdlib: true,
+            use_defaultlibs: true,
             pic: false,
             allow_nexe_build_id: false,
             static_: true,
@@ -181,45 +186,43 @@ impl Invocation {
             .unwrap_or_else(|| From::from("a.out") )
     }
 
-    pub fn get_bc_search_paths(&self) -> Vec<PathBuf> {
-        let mut paths = self.search_paths.clone();
-
-        if self.use_stdlib {
-            let base = util::need_nacl_toolchain();
-            let arch_subpath = self.get_arch().bc_subpath();
-            let base_usr_lib = base
-                .join(arch_subpath)
-                .join("usr/lib");
-            let base_lib = base
-                .join(arch_subpath)
-                .join("lib");
-            let base_clang_lib = base
-                .join("lib/clang")
-                .join(util::CLANG_VERSION)
-                .join("lib/le32-nacl");
-            paths.push(base_usr_lib);
-            paths.push(base_lib);
-            paths.push(base_clang_lib);
-        }
-
-        paths
-    }
-
     /// Add a non-flag input.
-    pub fn add_input(&mut self, input: PathBuf) -> Result<(), String> {
-        if util::filetype::is_file_native(&input) {
-            try!(self.check_native_allowed());
-            self.has_native_inputs = true;
-            self.native_inputs.push(input);
-        } else {
-            self.has_bitcode_inputs = true;
-            self.bitcode_inputs.push(input);
+    pub fn add_input(&mut self, input: Input) -> Result<(), String> {
+        use util::ldtools::*;
+        let expanded = try!(extend_inputs(input));
+        'outer: for input in expanded.into_iter() {
+            'inner: loop {
+                match &input {
+                    &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
+                    &Input::Library(_, ref name, ty) => {
+                        if ty == AllowedTypes::Native {
+                            try!(self.check_native_allowed());
+                        }
+
+                        let input_str = name.to_str();
+                        if input_str.is_none() {
+                            inputs.push(name.clone());
+                            continue;
+                        }
+                        let input_str = input_str.unwrap();
+
+                        let mut private_lib = None;
+                        for i in SPECIAL_LIBS.iter() {
+                            let &(public_name, (_, _)) = i;
+                            if public_name == input_str {
+                                private_lib = Some(i);
+                                break;
+                            }
+                        }
+                        if private_lib.is_some()
+                    },
+                    _ => (),
+                }
+                break;
+            }
+
         }
         Ok(())
-    }
-    pub fn add_input_flag(&mut self, flag: PathBuf) {
-        self.bitcode_inputs.push(flag.clone());
-        self.native_inputs.push(flag);
     }
 
     fn check_native_allowed(&self) -> Result<(), String> {
@@ -250,13 +253,7 @@ impl util::ToolInvocation for Invocation {
         match iteration {
             0 => {
                 if self.allow_native && self.arch.is_none() {
-                    return Err("`--pnacl-allow-native` given, but translation
-                                is not happening (missing `-target`?)".to_string());
-                }
-            },
-            1 => {
-                if !self.has_native_inputs() && !self.has_bitcode_inputs() {
-                    return Err("no inputs".to_string());
+                    return Err("`--pnacl-allow-native` given, but translation is not happening (missing `-target`?)".to_string());
                 }
 
                 if self.use_stdlib {
@@ -277,7 +274,11 @@ impl util::ToolInvocation for Invocation {
                     self.search_paths.push(base_lib);
                     self.search_paths.push(base_clang_lib);
                 }
-
+            },
+            1 => {
+                if !self.has_native_inputs() && !self.has_bitcode_inputs() {
+                    return Err("no inputs".to_string());
+                }
 
                 // Fix private libs:
                 /// If not using the IRT or if private libraries are used:
@@ -289,13 +290,13 @@ impl util::ToolInvocation for Invocation {
                 /// This occurs before path resolution (important because public/private
                 /// libraries aren't always colocated) and assumes that -l:libfoo.a syntax
                 /// isn't used by the driver for relevant libraries.
-                fn fix_private_libs(invocation_inputs: &mut Vec<PathBuf>,
+                fn fix_private_libs(invocation_inputs: &mut Vec<Input>,
                                     search_paths: &[PathBuf], static_only: bool) ->
                     Result<(), String>
                 {
                     let mut inputs = Vec::new();
                     for input in {
-                        let mut i: Vec<PathBuf> = Vec::new();
+                        let mut i: Vec<Input> = Vec::new();
                         mem::swap(invocation_inputs, &mut i);
                         i.into_iter()
                     }
@@ -327,14 +328,15 @@ impl util::ToolInvocation for Invocation {
                             }
                         }
 
+                        let expanded = try!(expand_input(input));
+
                         inputs.push(input);
                     }
 
                     *invocation_inputs =
                         try!(expand_inputs(inputs.into_iter(),
                                            search_paths,
-                                           static_only,
-                                           AllowedTypes::Any));
+                                           static_only));
                     Ok(())
                 }
 
@@ -357,56 +359,56 @@ impl util::ToolInvocation for Invocation {
         match iteration {
             0 => {
                 static ARGS: util::ToolArgs<Invocation> =
-                    &[&[&ALLOW_NATIVE,
-                        &TARGET,
-                        ],
+                    &[&ALLOW_NATIVE,
+                      &TARGET,
+                      &SEARCH_PATH,
+                      &NO_STDLIB,
                       ];
                 Some(ARGS)
             },
             1 => {
                 // The rest
                 static ARGS: util::ToolArgs<Invocation> =
-                    &[&[&NO_IRT_ARG,
-                        &PNACL_EXCEPTIONS,
-                        &PNACL_DISABLE_ABI_CHECK,
-                        &PNACL_DISABLE_PASS,
-                        &PNACL_RUN_PASSES_SEPARATELY,
-                        &OUTPUT,
-                        &STATIC,
-                        &RELOCATABLE1,
-                        &RELOCATABLE2,
-                        &RELOCATABLE3,
-                        &SEARCH_PATH,
-                        &RPATH,
-                        &RPATH_LINK,
-                        &LINKER_SCRIPT,
-                        &HYPHIN_E,
-                        &VERSION_SCRIPT,
-                        &NATIVE_FLAGS,
-                        &SEGMENT,
-                        &SECTION_START,
-                        &BUILD_ID,
-                        &TRANS_FLAGS,
-                        &EXPORT_DYNAMIC,
-                        &SONAME,
-                        &PASSTHROUGH_BC_LINK_FLAGS1,
-                        &PASSTHROUGH_BC_LINK_FLAGS2,
-                        &PASSTHROUGH_BC_LINK_FLAGS3,
-                        &PASSTHROUGH_BC_LINK_FLAGS4,
-                        &PIC_FLAG,
-                        &OPTIMIZE_FLAG,
-                        &LTO_FLAG,
-                        &FAST_TRANS_FLAG,
-                        &STRIP_ALL_FLAG,
-                        &STRIP_DEBUG_FLAG,
-                        &LIBRARY,
-                        &AS_NEEDED_FLAG,
-                        &GROUP_FLAG,
-                        &WHOLE_ARCHIVE_FLAG,
-                        &LINKAGE_FLAG,
-                        &UNDEFINED,
-                        &INPUTS,
-                        ],
+                    &[&NO_IRT_ARG,
+                      &PNACL_EXCEPTIONS,
+                      &PNACL_DISABLE_ABI_CHECK,
+                      &PNACL_DISABLE_PASS,
+                      &PNACL_RUN_PASSES_SEPARATELY,
+                      &OUTPUT,
+                      &STATIC,
+                      &RELOCATABLE1,
+                      &RELOCATABLE2,
+                      &RELOCATABLE3,
+                      &RPATH,
+                      &RPATH_LINK,
+                      &LINKER_SCRIPT,
+                      &HYPHIN_E,
+                      &VERSION_SCRIPT,
+                      &NATIVE_FLAGS,
+                      &SEGMENT,
+                      &SECTION_START,
+                      &BUILD_ID,
+                      &TRANS_FLAGS,
+                      &EXPORT_DYNAMIC,
+                      &SONAME,
+                      &PASSTHROUGH_BC_LINK_FLAGS1,
+                      &PASSTHROUGH_BC_LINK_FLAGS2,
+                      &PASSTHROUGH_BC_LINK_FLAGS3,
+                      &PASSTHROUGH_BC_LINK_FLAGS4,
+                      &PIC_FLAG,
+                      &OPTIMIZE_FLAG,
+                      &LTO_FLAG,
+                      &FAST_TRANS_FLAG,
+                      &STRIP_ALL_FLAG,
+                      &STRIP_DEBUG_FLAG,
+                      &LIBRARY,
+                      &AS_NEEDED_FLAG,
+                      &GROUP_FLAG,
+                      &WHOLE_ARCHIVE_FLAG,
+                      &LINKAGE_FLAG,
+                      &UNDEFINED,
+                      &UNSUPPORTED, // must be before INPUTS.
+                      &INPUTS,
                       ];
                 Some(ARGS)
             },
@@ -590,7 +592,7 @@ static ALLOW_NATIVE: ToolArg = util::ToolArg {
     split: None,
     action: Some(set_allow_native as ToolArgActionFn),
 };
-fn set_allow_native<'str>(this: &mut Invocation, _: regex::Captures) -> Result<(), String> {
+fn set_allow_native<'str>(this: &mut Invocation, _single: bool, _: regex::Captures) -> Result<(), String> {
     this.allow_native = true;
     Ok(())
 }
@@ -600,7 +602,7 @@ static NO_IRT_ARG: ToolArg = util::ToolArg {
     split: None,
     action: Some(set_noirt as ToolArgActionFn)
 };
-fn set_noirt<'str>(this: &mut Invocation, _: regex::Captures) -> Result<(), String> {
+fn set_noirt<'str>(this: &mut Invocation, _single: bool, _: regex::Captures) -> Result<(), String> {
     this.use_irt = false;
     Ok(())
 }
@@ -609,7 +611,7 @@ static PNACL_DISABLE_ABI_CHECK: ToolArg = util::ToolArg {
     split: None,
     action: Some(set_pnacl_disable_abi_check as ToolArgActionFn),
 };
-fn set_pnacl_disable_abi_check<'str>(this: &mut Invocation, _: regex::Captures) -> Result<(), String> {
+fn set_pnacl_disable_abi_check<'str>(this: &mut Invocation, _single: bool, _: regex::Captures) -> Result<(), String> {
     this.abi_check = false;
     Ok(())
 }
@@ -617,7 +619,7 @@ fn set_pnacl_disable_abi_check<'str>(this: &mut Invocation, _: regex::Captures) 
 tool_argument!(PNACL_EXCEPTIONS: Invocation = {
     r"^(--pnacl-exceptions=(none|sjlj|zerocost)|--pnacl-allow-exceptions)$", None
 };
-               fn set_eh_mode(this, cap) {
+               fn set_eh_mode(this, _single, cap) {
                    this.eh_mode = try!(util::EhMode::parse_arg(cap.at(0).unwrap()).unwrap());
                    if this.eh_mode == util::EhMode::Zerocost {
                        try!(this.check_native_allowed());
@@ -626,38 +628,41 @@ tool_argument!(PNACL_EXCEPTIONS: Invocation = {
                });
 
 tool_argument!(PNACL_DISABLE_PASS: Invocation = { r"^--pnacl-disable-pass=(.+)$", None };
-               fn add_disabled_pass(this, cap) {
+               fn add_disabled_pass(this, _single, cap) {
                    this.disabled_passes.push(cap.at(1).unwrap().to_string());
                    Ok(())
                });
 tool_argument!(PNACL_RUN_PASSES_SEPARATELY: Invocation = { r"--pnacl-run-passes-separately", None };
-               fn set_run_passes_separately(this, _cap) {
+               fn set_run_passes_separately(this, _single, _cap) {
                    this.run_passes_separately = true;
                    Ok(())
                });
-tool_argument!(TARGET: Invocation = { r"--target=(.+)", Some(&[regex!(r"-target")]) };
-               fn set_target(this, cap) {
+tool_argument!(TARGET: Invocation = { r"--target=(.+)", Some(regex!(r"-target")) };
+               fn set_target(this, single, cap) {
                    if this.arch.is_some() {
                        return Err("the target has already been set".to_string());
                    }
-                   let arch = try!(util::Arch::parse_from_triple(cap.at(1).unwrap()));
+                   let arch = if single { cap.at(1).unwrap() }
+                              else      { cap.at(0).unwrap() };
+                   let arch = try!(util::Arch::parse_from_triple(arch));
                    this.arch = Some(arch);
                    Ok(())
                });
-tool_argument!(OUTPUT: Invocation = { r"-o(.+)", Some(&[regex!(r"-(o|-output)")]) };
-               fn set_output(this, cap) {
+tool_argument!(OUTPUT: Invocation = { r"-o(.+)", Some(regex!(r"-(o|-output)")) };
+               fn set_output(this, single, cap) {
                    if this.output.is_some() {
                        return Err("more than one output specified".to_string());
                    }
 
-                   let out = cap.at(0).unwrap();
+                   let out = if single { cap.at(1).unwrap() }
+                             else      { cap.at(0).unwrap() };
                    let out = Path::new(out);
                    let out = out.to_path_buf();
                    this.output = Some(out);
                    Ok(())
                });
 tool_argument!(STATIC: Invocation = { r"-static", None };
-               fn set_static(this, _cap) {
+               fn set_static(this, _single, _cap) {
                    if !this.relocatable {
                        this.static_ = true;
                    } else {
@@ -680,33 +685,35 @@ static RELOCATABLE3: ToolArg = util::ToolArg {
     split: None,
     action: Some(set_relocatable as ToolArgActionFn),
 };
-fn set_relocatable<'str>(this: &mut Invocation, _: regex::Captures) -> Result<(), String> {
+fn set_relocatable<'str>(this: &mut Invocation, _single: bool,
+                         _: regex::Captures) -> Result<(), String> {
     this.relocatable = true;
     this.static_ = false;
     Ok(())
 }
 
-tool_argument!(SEARCH_PATH: Invocation = { r"^-L(.+)$", Some(&[regex!(r"^-(L|-library-path)$")]) };
-               fn add_search_path(this, cap) {
-                   let path = cap.at(0).unwrap();
+tool_argument!(SEARCH_PATH: Invocation = { r"^-L(.+)$", Some(regex!(r"^-(L|-library-path)$")) };
+               fn add_search_path(this, single, cap) {
+                   let path = if single { cap.at(1).unwrap() }
+                              else      { cap.at(0).unwrap() };
                    let path = Path::new(path);
                    this.search_paths.push(path.to_path_buf());
                    Ok(())
                });
-tool_argument!(RPATH: Invocation = { r"^-rpath=(.*)$", Some(&[regex!(r"^-rpath$")]) });
-tool_argument!(RPATH_LINK: Invocation = { r"^-rpath-link=(.*)$", Some(&[regex!(r"^-rpath-link$")]) });
+tool_argument!(RPATH: Invocation = { r"^-rpath=(.*)$", Some(regex!(r"^-rpath$")) });
+tool_argument!(RPATH_LINK: Invocation = { r"^-rpath-link=(.*)$", Some(regex!(r"^-rpath-link$")) });
 
-fn add_to_native_link_flags<'str>(this: &mut Invocation,
-                             cap: regex::Captures) -> Result<(), String> {
+fn add_to_native_link_flags(this: &mut Invocation, _single: bool,
+                            cap: regex::Captures) -> Result<(), String> {
     this.add_native_ld_flag(cap.at(0).unwrap())
 }
-fn add_to_bc_link_flags<'str>(this: &mut Invocation,
-                              cap: regex::Captures) -> Result<(), String> {
+fn add_to_bc_link_flags(this: &mut Invocation, _single: bool,
+                        cap: regex::Captures) -> Result<(), String> {
     this.ld_flags.push(cap.at(0).unwrap().to_string());
     Ok(())
 }
-fn add_to_both_link_flags<'str>(this: &mut Invocation,
-                                cap: regex::Captures) -> Result<(), String> {
+fn add_to_both_link_flags(this: &mut Invocation, _single: bool,
+                          cap: regex::Captures) -> Result<(), String> {
     let flag = cap.at(0).unwrap().to_string();
     this.ld_flags.push(flag.clone());
     this.add_native_ld_flag(&flag[..])
@@ -714,13 +721,13 @@ fn add_to_both_link_flags<'str>(this: &mut Invocation,
 
 static LINKER_SCRIPT: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"^(-T)$")]),
+    split: Some(regex!(r"^(-T)$")),
     action: Some(add_to_native_link_flags as ToolArgActionFn),
 };
 /// TODO(pdox): Allow setting an alternative _start symbol in bitcode
 static HYPHIN_E: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"^-e$")]),
+    split: Some(regex!(r"^(-e)$")),
     action: Some(add_to_both_link_flags as ToolArgActionFn),
 };
 
@@ -728,7 +735,7 @@ static HYPHIN_E: ToolArg = util::ToolArg {
 tool_argument!(VERSION_SCRIPT: Invocation = { r"^--version-script=.*$", None });
 
 tool_argument!(NATIVE_FLAGS: Invocation = { r"^-Wn,(.*)$", None };
-               fn add_native_flags(this, cap) {
+               fn add_native_flags(this, _single, cap) {
                    let args = cap.at(1).unwrap();
                    for arg in args.split(',') {
                        try!(this.add_native_ld_flag(arg));
@@ -743,26 +750,28 @@ static SEGMENT: ToolArg = util::ToolArg {
 };
 static SECTION_START: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"^--section-start$")]),
+    split: Some(regex!(r"^--section-start$")),
     action: Some(section_start as ToolArgActionFn),
 };
-fn section_start<'str>(this: &mut Invocation,
-                       cap: regex::Captures) -> Result<(), String> {
+fn section_start(this: &mut Invocation,
+                 _single: bool,
+                 cap: regex::Captures) -> Result<(), String> {
     try!(this.add_native_ld_flag("--section-start"));
     this.add_native_ld_flag(cap.at(1).unwrap())
 }
 static BUILD_ID: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"^--build-id$")]),
+    split: Some(regex!(r"^--build-id$")),
     action: Some(build_id as ToolArgActionFn),
 };
 fn build_id<'str>(this: &mut Invocation,
+                  _single: bool,
                   _cap: regex::Captures) -> Result<(), String> {
     this.add_native_ld_flag("--build-id")
 }
 
 tool_argument!(TRANS_FLAGS: Invocation = { r"^-Wt,(.*)$", None };
-               fn add_trans_flags(this, cap) {
+               fn add_trans_flags(this, _single, cap) {
                    let args = cap.at(1).unwrap();
                    for arg in args.split(',') {
                        try!(this.add_trans_flag(arg));
@@ -779,8 +788,8 @@ static EXPORT_DYNAMIC: ToolArg = util::ToolArg {
     action: Some(add_to_bc_link_flags as ToolArgActionFn),
 };
 
-tool_argument!(SONAME: Invocation = { r"-?-soname=(.+)", Some(&[regex!(r"-?-soname")]) };
-               fn set_soname(this, cap) {
+tool_argument!(SONAME: Invocation = { r"-?-soname=(.+)", Some(regex!(r"-?-soname")) };
+               fn set_soname(this, _single, cap) {
                    if this.soname.is_some() {
                        return Err("the shared object name has already been set".to_string());
                    }
@@ -789,18 +798,16 @@ tool_argument!(SONAME: Invocation = { r"-?-soname=(.+)", Some(&[regex!(r"-?-sona
                    Ok(())
                });
 
-static PASSTHROUGH_BC_LINK_FLAGS1: ToolArg = util::ToolArg {
-    single: Some(regex!(r"(-M|--print-map|-t|--trace)")),
-    split: None,
-    action: Some(add_to_bc_link_flags as ToolArgActionFn),
-};
+argument!(impl PASSTHROUGH_BC_LINK_FLAGS1 where { Some(r"(-M|--print-map|-t|--trace)"), None } for Invocation
+          => Some(add_to_bc_link_flags));
 
 static PASSTHROUGH_BC_LINK_FLAGS2: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"-y")]),
+    split: Some(regex!(r"-y")),
     action: Some(passthrough_bc_link_flags2 as ToolArgActionFn),
 };
 fn passthrough_bc_link_flags2<'str>(this: &mut Invocation,
+                                    _single: bool,
                                     cap: regex::Captures) -> Result<(), String> {
     this.ld_flags.push("-y".to_string());
     this.ld_flags.push(cap.at(1).unwrap().to_string());
@@ -808,21 +815,23 @@ fn passthrough_bc_link_flags2<'str>(this: &mut Invocation,
 }
 static PASSTHROUGH_BC_LINK_FLAGS3: ToolArg = util::ToolArg {
     single: None,
-    split: Some(&[regex!(r"-defsym")]),
+    split: Some(regex!(r"-defsym")),
     action: Some(passthrough_bc_link_flags3 as ToolArgActionFn),
 };
 fn passthrough_bc_link_flags3<'str>(this: &mut Invocation,
+                                    _single: bool,
                                     cap: regex::Captures) -> Result<(), String> {
     this.ld_flags.push("-defsym".to_string());
     this.ld_flags.push(cap.at(0).unwrap().to_string());
     Ok(())
 }
 static PASSTHROUGH_BC_LINK_FLAGS4: ToolArg = util::ToolArg {
-    single: Some(regex!(r"-?-wrap=(.+)")),
-    split: Some(&[regex!(r"-?-wrap")]),
+    single: Some(regex!(r"^-?-wrap=(.+)$")),
+    split: Some(regex!(r"^-?-wrap$")),
     action: Some(passthrough_bc_link_flags4 as ToolArgActionFn),
 };
 fn passthrough_bc_link_flags4<'str>(this: &mut Invocation,
+                                    _single: bool,
                                     cap: regex::Captures) -> Result<(), String> {
     this.ld_flags.push("-wrap".to_string());
     this.ld_flags.push(cap.at(0).unwrap().to_string());
@@ -830,13 +839,13 @@ fn passthrough_bc_link_flags4<'str>(this: &mut Invocation,
 }
 
 tool_argument!(PIC_FLAG: Invocation = { r"^-fPIC$", None };
-               fn set_pic(this, _cap) {
+               fn set_pic(this, _single, _cap) {
                    this.pic = true;
                    Ok(())
                });
 
 tool_argument!(OPTIMIZE_FLAG: Invocation = { r"^-O([0-4sz]?)$", None };
-               fn set_optimize(this, cap) {
+               fn set_optimize(this, _single, cap) {
                    this.optimize = cap.at(0)
                        .and_then(|str| util::OptimizationGoal::parse(str) )
                        .unwrap();
@@ -844,30 +853,31 @@ tool_argument!(OPTIMIZE_FLAG: Invocation = { r"^-O([0-4sz]?)$", None };
                });
 
 tool_argument!(FAST_TRANS_FLAG: Invocation = { r"^(-translate-fast)$", None };
-               fn set_trans_fast(this, cap) {
+               fn set_trans_fast(this, _single, cap) {
                    this.add_trans_flag(cap.at(0).unwrap())
                });
 
 tool_argument!(STRIP_ALL_FLAG: Invocation = { r"^(-s|--strip-all)$", None };
-               fn set_strip_all(this, _cap) {
+               fn set_strip_all(this, _single, _cap) {
                    this.strip = util::StripMode::All;
                    Ok(())
                });
 
 tool_argument!(STRIP_DEBUG_FLAG: Invocation = { r"^(-S|--strip-debug)$", None };
-               fn set_strip_debug(this, _cap) {
+               fn set_strip_debug(this, _single, _cap) {
                    this.strip = util::StripMode::Debug;
                    Ok(())
                });
 
-tool_argument!(LIBRARY: Invocation = { r"^-l(.+)$", Some(&[regex!(r"^-(l|-library)$")]) };
-               fn add_library(this, cap) {
-                   this.add_input(From::from(format!("-l{}", cap.at(0).unwrap())))
+tool_argument!(LIBRARY: Invocation = { r"^-l(.+)$", Some(regex!(r"^-(l|-library)$")) };
+               fn add_library(this, _single, cap) {
+                   this.add_input(Input::Library(From::from(cap.at(1).unwrap())))
                });
 
 fn add_input_flag<'str>(this: &mut Invocation,
+                        _single: bool,
                         cap: regex::Captures) -> Result<(), String> {
-    this.add_input_flag(From::from(cap.at(0).unwrap()));
+    this.add_input(Input::Flag(From::from(cap.at(0).unwrap())));
     Ok(())
 }
 
@@ -892,12 +902,10 @@ static LINKAGE_FLAG: ToolArg = util::ToolArg {
     action: Some(add_input_flag as ToolArgActionFn),
 };
 
-tool_argument!(UNDEFINED: Invocation = { r"^-(-undefined=|u)(.+)$", Some(&[regex!(r"^-u$")]) };
-               fn add_undefined(this, cap) {
-                   let sym = match cap.at(0).unwrap() {
-                       "-undefined=" | "u" => cap.at(1).unwrap(),
-                       symbol_name => symbol_name,
-                   };
+tool_argument!(UNDEFINED: Invocation = { r"^-(-undefined=|u)(.+)$", Some(regex!(r"^-u$")) };
+               fn add_undefined(this, single, cap) {
+                   let sym = if single { cap.at(2).unwrap() }
+                             else { cap.at(1).unwrap() };
 
                    this.add_input_flag(From::from(format!("--undefined={}", sym)));
                    Ok(())
@@ -905,12 +913,160 @@ tool_argument!(UNDEFINED: Invocation = { r"^-(-undefined=|u)(.+)$", Some(&[regex
 
 
 tool_argument!(LTO_FLAG: Invocation = { r"^-flto$", None };
-               fn set_lto(this, _cap) {
+               fn set_lto(this, _single, _cap) {
                    this.lto = true;
                    Ok(())
                });
 
+argument!(impl UNSUPPORTED where { Some(r"^-.+$"), None } for Invocation {
+    fn unsupported_flag(_this, _single, _cap) {
+        return Err("unsupported argument".to_string());
+    }
+});
+
+argument!(impl NO_STDLIB where { Some(r"^-nostdlib$"), None } for Invocation {
+    fn no_stdlib(this, _single, _cap) {
+        this.use_stdlib = false;
+    }
+});
+
+argument!(impl NO_DEFAULTLIBS where { Some(r"^-nodefaultlibs$"), None } for Invocation {
+    fn no_defaultlib(this, _single, _cap) {
+        this.use_defaultlibs = false;
+    }
+});
+
 tool_argument!(INPUTS: Invocation = { r"^(.+)$", None };
-               fn add_input(this, cap) {
-                   this.add_input(From::from(cap.at(0).unwrap()))
+               fn add_input(this, _single, cap) {
+                   this.add_input(Input::File(From::from(cap.at(1).unwrap())))
                });
+
+#[cfg(test)] #[allow(unused_imports)]
+mod tests {
+    use util;
+    use util::*;
+    use util::filetype::*;
+    use super::*;
+
+    use std::path::{PathBuf, Path};
+
+    #[test]
+    fn unsupported_flag() {
+        let args = vec!["-unsupported-flag".to_string()];
+        let mut i: Invocation = Default::default();
+
+        assert!(util::process_invocation_args(&mut i, args).is_err());
+    }
+
+    #[test]
+    fn group_flags0() {
+        use util::filetype::*;
+
+        override_filetype("libsome.a", Type::Archive(Subtype::Bitcode));
+        override_filetype("input.bc", Type::Object(Subtype::Bitcode));
+
+        let args = vec!["input.bc".to_string(),
+                        "--start-group".to_string(),
+                        "-lsome".to_string(),
+                        "--end-group".to_string()];
+        let mut i: Invocation = Default::default();
+        i.search_paths.push(From::from("."));
+        let res = util::process_invocation_args(&mut i, args);
+
+        println!("{:?}", i);
+
+        res.unwrap();
+
+        assert!(i.search_paths.contains(&From::from(".")));
+        assert!(&i.bitcode_inputs[1..] == &[Path::new("--start-group").to_path_buf(),
+                                            Path::new("-lsome").to_path_buf(),
+                                            Path::new("--end-group").to_path_buf()]);
+        assert!(&i.native_inputs[..] == &[Path::new("--start-group").to_path_buf(),
+                                          Path::new("--end-group").to_path_buf()]);
+
+    }
+
+    #[test]
+    fn group_flags1() {
+        override_filetype("libsome.a", Type::Archive(Subtype::ELF(elf::types::Machine(0))));
+        override_filetype("input.o", Type::Object(Subtype::ELF(elf::types::Machine(0))));
+
+        let args = vec!["input.o".to_string(),
+                        "--start-group".to_string(),
+                        "-lsome".to_string(),
+                        "--end-group".to_string()];
+        let mut i: Invocation = Default::default();
+        i.allow_native = true;
+        i.arch = Some(util::Arch::X8664);
+        i.search_paths.push(From::from("."));
+        let res = util::process_invocation_args(&mut i, args);
+
+        println!("{:?}", i);
+
+        res.unwrap();
+
+        assert_eq!(&i.bitcode_inputs[1..], &[Path::new("--start-group").to_path_buf(),
+                                             Path::new("--end-group").to_path_buf()]);
+
+        assert_eq!(&i.native_inputs[..], &[Path::new("--start-group").to_path_buf(),
+                                           Path::new("-lsome").to_path_buf(),
+                                           Path::new("--end-group").to_path_buf()]);
+
+    }
+
+    #[test]
+    fn input_arguments_bitcode() {
+        override_filetype("input0.bc", Type::Object(Subtype::Bitcode));
+        override_filetype("input1.bc", Type::Object(Subtype::Bitcode));
+
+        let args = vec!["input0.bc".to_string(),
+                        "input1.bc".to_string()];
+        let mut i: Invocation = Default::default();
+        util::process_invocation_args(&mut i, args).unwrap();
+
+        println!("{:?}", i);
+
+        assert!(&i.bitcode_inputs[..] == &[Path::new("input0.bc").to_path_buf(),
+                                           Path::new("input1.bc").to_path_buf()]);
+    }
+
+    #[test]
+    fn native_needs_targets() {
+        let args = vec!["--pnacl-allow-native".to_string()];
+        let mut i: Invocation = Default::default();
+        let res = util::process_invocation_args(&mut i, args);
+        println!("{:?}", i);
+        assert!(res.is_err());
+
+
+        override_filetype("input.o", Type::Object(Subtype::Bitcode));
+        let args = vec!["input.o".to_string(),
+                        "--pnacl-allow-native".to_string(),
+                        "--target=arm-nacl".to_string()];
+        let mut i: Invocation = Default::default();
+        let res = util::process_invocation_args(&mut i, args);
+        println!("{:?}", i);
+        res.unwrap();
+
+    }
+
+    #[test]
+    fn native_disallowed() {
+        override_filetype("input.o", Type::Object(Subtype::ELF(elf::types::Machine(0))));
+
+        let args = vec!["input.o".to_string()];
+        let mut i: Invocation = Default::default();
+
+        let res = util::process_invocation_args(&mut i, args);
+        println!("{:?}", i);
+        assert!(res.is_err());
+    }
+    #[test]
+    fn no_inputs() {
+        let args = vec![];
+        let mut i: Invocation = Default::default();
+        let res = util::process_invocation_args(&mut i, args);
+        println!("{:?}", i);
+        assert!(res.is_err());
+    }
+}

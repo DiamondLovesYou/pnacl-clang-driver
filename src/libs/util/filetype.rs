@@ -1,31 +1,182 @@
 
-
-use std::path::Path;
+use std::collections::HashMap;
+use std::io::{self, Read, Seek, Cursor};
+use std::path::{Path, PathBuf};
+use std::sync::{self, Arc, Mutex};
 
 use ldtools;
+
+
+// Rust goes into anaphylaxic shock on mutable globals which require
+// drops. This backflip is to that effect. The pointer is never deallocated.
+static FILETYPE_CACHE_START: sync::Once = sync::ONCE_INIT;
+#[derive(Clone, Copy, Eq, PartialEq)] #[allow(raw_pointer_derive)]
+struct FiletypeCache(*mut Arc<Mutex<HashMap<PathBuf, Type>>>);
+unsafe impl Sync for FiletypeCache {}
+
+static mut FILETYPE_CACHE: FiletypeCache = FiletypeCache(0 as *mut _);
+
+
+pub fn get_filetype_cache() -> Arc<Mutex<HashMap<PathBuf, Type>>> {
+    FILETYPE_CACHE_START.call_once(|| {
+        debug_assert!(unsafe { FILETYPE_CACHE == FiletypeCache(0 as *mut _) });
+
+        let cache: Box<Arc<Mutex<HashMap<PathBuf, Type>>>>
+            = box Arc::new(Mutex::new(HashMap::new()));
+
+        unsafe { FILETYPE_CACHE = FiletypeCache(::std::mem::transmute(cache)) }
+    });
+
+    unsafe {
+        let FiletypeCache(inner) = FILETYPE_CACHE;
+        (*inner).clone()
+    }
+}
+
+pub fn override_filetype<T: AsRef<Path>>(p: T, t: Type) {
+    let cache = get_filetype_cache();
+
+    cache.lock().unwrap().insert(p.as_ref().to_path_buf(), t);
+}
+pub fn clear_filetype<T: AsRef<Path>>(p: T) {
+    let cache = get_filetype_cache();
+    cache.lock().unwrap().remove(&p.as_ref().to_path_buf());
+}
+pub fn clear_filetypes() {
+    let cache = get_filetype_cache();
+    cache.lock().unwrap().clear();
+}
+
+pub fn get_cached_filetype<T: AsRef<Path>>(p: T) -> Option<Type> {
+    let cache = get_filetype_cache();
+
+    let lock = cache.lock().unwrap();
+
+    lock.get(&p.as_ref().to_path_buf())
+        .map(|t| t.clone() )
+}
+
+// for testing:
+static FILE_CACHE_START: sync::Once = sync::ONCE_INIT;
+
+#[derive(Clone, Copy, Eq, PartialEq)] #[allow(raw_pointer_derive)]
+struct FileContentsCache(*mut Arc<Mutex<HashMap<PathBuf, &'static [u8]>>>);
+unsafe impl Sync for FileContentsCache {}
+static mut FILE_CACHE: FileContentsCache = FileContentsCache(0 as *mut _);
+
+fn get_file_cache() -> Arc<Mutex<HashMap<PathBuf, &'static [u8]>>> {
+    FILE_CACHE_START.call_once(|| {
+        debug_assert!(unsafe { FILE_CACHE == FileContentsCache(0 as *mut _) });
+
+        let cache: Box<Arc<Mutex<HashMap<PathBuf, Type>>>>
+            = box Arc::new(Mutex::new(HashMap::new()));
+
+        unsafe { FILE_CACHE = FileContentsCache(::std::mem::transmute(cache)) }
+    });
+
+    unsafe {
+        let FileContentsCache(inner) = FILE_CACHE;
+        (*inner).clone()
+    }
+}
+
+pub fn override_file_contents<T: AsRef<Path>>(p: T, contents: &'static [u8]) {
+    let cache = get_file_cache();
+
+    cache
+        .lock()
+        .unwrap()
+        .insert(p.as_ref().to_path_buf(), contents);
+}
+pub fn clear_file_contents_cache<T: AsRef<Path>>(p: T) {
+    let cache = get_file_cache();
+
+    cache
+        .lock()
+        .unwrap()
+        .remove(&p.as_ref().to_path_buf());
+}
+
+pub trait ReadSeek: Read + Seek { }
+impl<T> ReadSeek for T
+    where T: Read + Seek
+{
+}
+
+pub fn get_file_contents<T: AsRef<Path>, F, U>(path: T, f: F) ->
+    io::Result<U> where F: FnOnce(&T, &mut ReadSeek) -> U,
+{
+    use std::fs::File;
+    let opt = {
+        let cache = get_file_cache();
+
+        let lock = cache
+            .lock()
+            .unwrap();
+
+        lock.get(&path.as_ref().to_path_buf())
+            .map(|&a| Cursor::new(a.as_ref()) )
+    };
+    match opt {
+        Some(mut stream) => Ok(f(&path, &mut stream)),
+        None => {
+            let mut file = try!(File::open(&path));
+            Ok(f(&path, &mut file))
+        }
+    }
+}
+
+pub fn file_exists<T: AsRef<Path>>(path: T) -> bool {
+    use std::fs::PathExt;
+    let cache = get_file_cache();
+
+    let lock = cache
+        .lock()
+        .unwrap();
+
+    return lock.get(&path.as_ref().to_path_buf()).is_some() ||
+        path.as_ref().exists()
+}
 
 const LLVM_BITCODE_MAGIC: &'static str = r"BC\xc0\xde";
 const LLVM_WRAPPER_MAGIC: &'static str = r"\xde\xc0\x17\x0b";
 const PNACL_BITCODE_MAGIC: &'static str = r"PEXE";
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Subtype {
+    Bitcode,
+    ELF(elf::types::Machine),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Type {
-    Archive(ar::Type),
+    Archive(Subtype),
+    Object(Subtype),
+    Pexe,
 }
 
 macro_rules! test_magic (
     ($file_name:ident $buffer_name:ident $max_size:expr =>
-     [$($magic:expr),+]) => (
+     [$($magic:expr),+] -> $ty:expr) => (
         pub fn $file_name<T: AsRef<::std::path::Path>>(path: T) -> bool {
-            use std::fs::File;
+            let cached_type = get_cached_filetype(&path);
+            if cached_type.is_some() {
+                let cached_type = cached_type.unwrap();
+                if cached_type == $ty {
+                    return true;
+                }
+            }
 
-            let file_res = File::open(path);
-            if file_res.is_err() { return false; }
-            let mut file = file_res.unwrap();
+            let is = get_file_contents(&path, |_, file| $buffer_name(file) )
+                .unwrap_or(false);
 
-            $buffer_name(&mut file)
+            if is {
+                override_filetype(path, $ty);
+            }
+            return is;
         }
 
-        pub fn $buffer_name<T: ::std::io::Read + ::std::io::Seek>(io: &mut T) ->
+        pub fn $buffer_name<T: ::std::io::Read + ::std::io::Seek + ?Sized>(io: &mut T) ->
             bool
         {
             use std::io::{Read, SeekFrom};
@@ -33,17 +184,15 @@ macro_rules! test_magic (
 
             let mut buf: [u8; $max_size] = unsafe { mem::uninitialized() };
             match io.read(buf.as_mut()) {
-                Ok(n) if n == buf.len() => {},
                 Ok(n) => {
                     io.seek(SeekFrom::Current(-(n as i64)))
                         .unwrap();
-                    return false;
+                    if n != buf.len() {
+                        return false;
+                    }
                 },
                 Err(_) => { return false; },
             }
-
-            io.seek(SeekFrom::Current(-(buf.len() as i64)))
-                .unwrap();
 
             return $(buf == $magic.as_ref())||+;
         }
@@ -51,27 +200,38 @@ macro_rules! test_magic (
 );
 
 test_magic!(is_file_raw_llvm_bitcode is_stream_raw_llvm_bitcode 4 =>
-            [LLVM_BITCODE_MAGIC]);
+            [LLVM_BITCODE_MAGIC] -> Type::Object(Subtype::Bitcode));
 test_magic!(is_file_wrapped_llvm_bitcode is_stream_wrapped_llvm_bitcode 4 =>
-            [LLVM_WRAPPER_MAGIC]);
+            [LLVM_WRAPPER_MAGIC] -> Type::Object(Subtype::Bitcode));
 test_magic!(is_file_pnacl_bitcode is_stream_pnacl_bitcode 4 =>
-            [PNACL_BITCODE_MAGIC]);
+            [PNACL_BITCODE_MAGIC] -> Type::Pexe);
 
 test_magic!(is_file_llvm_bitcode is_stream_llvm_bitcode 4 =>
-            [LLVM_BITCODE_MAGIC, LLVM_WRAPPER_MAGIC]);
+            [LLVM_BITCODE_MAGIC, LLVM_WRAPPER_MAGIC] -> Type::Object(Subtype::Bitcode));
 
 pub fn is_file_native<T: AsRef<Path>>(path: T) -> bool {
-    use std::fs::File;
+    let cached = get_cached_filetype(&path)
+        .map(|t| {
+            match t {
+                Type::Object(Subtype::ELF(_)) |
+                Type::Archive(Subtype::ELF(_)) |
+                Type::Pexe => true,
+                _ => false,
+            }
+        });
+    match cached {
+        Some(v) => { return v; },
+        _ => {},
+    }
 
-    let file_res = File::open(&path);
-    if file_res.is_err() { return false; }
-    let mut file = file_res.unwrap();
-
-    if is_stream_raw_llvm_bitcode(&mut file) ||
-        is_stream_wrapped_llvm_bitcode(&mut file) ||
-        is_stream_pnacl_bitcode(&mut file)
-    {
-        return false;
+    let is_obj_bc = get_file_contents(&path, |_, file| {
+        is_stream_raw_llvm_bitcode(file) ||
+            is_stream_wrapped_llvm_bitcode(file) ||
+            is_stream_pnacl_bitcode(file)
+    });
+    match is_obj_bc {
+        Ok(v) if v => { return false; }
+        _ => {},
     }
 
     if ar::archive_type(&path)
@@ -114,37 +274,84 @@ pub mod ar {
     use std::path::Path;
     use std::str::FromStr;
 
-    use elf;
     use llvm::archive_ro;
 
-    use super::{is_stream_llvm_bitcode};
+    use super::{is_stream_llvm_bitcode, get_cached_filetype,
+                get_file_contents, override_filetype};
 
-    #[derive(Copy, Clone)]
-    pub enum Type {
-        Bitcode,
-        ELF(elf::types::Machine),
-    }
+    pub use super::Subtype as Type;
 
     const AR_MAGIC: &'static str = r"!<arch>\n";
     const THIN_MAGIC: &'static str = r"!<thin>\n";
 
-    test_magic!(is_file_an_archive is_buffer_an_archive 8 => [AR_MAGIC,
-                                                              THIN_MAGIC]);
+    pub fn is_file_an_archive<T: AsRef<::std::path::Path>>(path: T) -> bool {
+        let cached_type = get_cached_filetype(&path);
+        if cached_type.is_some() {
+            let cached_type = cached_type.unwrap();
+            match cached_type {
+                super::Type::Archive(_) => {
+                    return true;
+                },
+                _ => {},
+            }
+        }
+
+        let is = get_file_contents(&path, |_, file| is_buffer_an_archive(file) )
+            .unwrap_or(false);
+        return is;
+    }
+
+    pub fn is_buffer_an_archive<T: ::std::io::Read + ::std::io::Seek + ?Sized>(io: &mut T) ->
+        bool
+    {
+        use std::io::{Read, SeekFrom};
+        use std::mem;
+
+        let mut buf: [u8; 8] = unsafe { mem::uninitialized() };
+        match io.read(buf.as_mut()) {
+            Ok(n) => {
+                io.seek(SeekFrom::Current(-(n as i64)))
+                    .unwrap();
+                if n != buf.len() {
+                    return false;
+                }
+            },
+            Err(_) => { return false; },
+        }
+
+        return buf == AR_MAGIC.as_ref() || buf == THIN_MAGIC.as_ref();
+    }
 
     pub fn archive_type<T: AsRef<Path>>(path: T) -> Option<Type> {
         use elf;
-        archive_ro::ArchiveRO::open(path.as_ref())
-            .and_then(|ar| {
-                for member in ar.iter() {
-                    let mut stream = Cursor::new(member.data());
-                    if is_stream_llvm_bitcode(&mut stream) {
-                        return Some(Type::Bitcode);
-                    } else if let Ok(elf) = elf::File::open_stream(&mut stream) {
-                        return Some(Type::ELF(elf.ehdr.machine));
-                    }
+        get_cached_filetype(&path)
+            .and_then(|t| match t {
+                super::Type::Archive(subtype) => Some(subtype),
+                _ => None,
+            })
+            .or_else(|| {
+                // XXX(rdiamond): This ignores our cache.
+                let res = archive_ro::ArchiveRO::open(path.as_ref())
+                    .and_then(|ar| {
+                        for member in ar.iter() {
+                            let mut stream = Cursor::new(member.data());
+                            if is_stream_llvm_bitcode(&mut stream) {
+                                return Some(Type::Bitcode);
+                            } else if let Ok(elf) = elf::File::open_stream(&mut stream) {
+                                return Some(Type::ELF(elf.ehdr.machine));
+                            }
+                        }
+
+                        None
+                    });
+                match res {
+                    Some(t) => {
+                        override_filetype(path, super::Type::Archive(t));
+                    },
+                    None => {},
                 }
 
-                None
+                res
             })
     }
 

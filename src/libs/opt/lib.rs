@@ -63,11 +63,10 @@ impl util::ToolInvocation for Invocation {
         match iteration {
             0 => {
                 static A: util::ToolArgs<Invocation> =
-                    &[&[&SIMPLIFY_LIBCALLS,
-                        &OUTPUT,
-                        &ARGS,
-                        &INPUTS,
-                        ],
+                    &[&SIMPLIFY_LIBCALLS,
+                      &OUTPUT,
+                      &ARGS,
+                      &INPUTS,
                       ];
                 Some(A)
             },
@@ -77,8 +76,8 @@ impl util::ToolInvocation for Invocation {
 }
 
 tool_argument!(SIMPLIFY_LIBCALLS: Invocation = { r"^--(enable|disable)-simplify-libcalls$", None };
-               fn set_simplify_libcalls(this, cap) {
-                   this.simplify_libcalls = match cap.at(0).unwrap() {
+               fn set_simplify_libcalls(this, _single, cap) {
+                   this.simplify_libcalls = match cap.at(1).unwrap() {
                        "enable" => true,
                        "disable" => false,
                        _ => unreachable!(),
@@ -86,13 +85,14 @@ tool_argument!(SIMPLIFY_LIBCALLS: Invocation = { r"^--(enable|disable)-simplify-
                    Ok(())
                });
 
-tool_argument!(OUTPUT: Invocation = { r"^-o(.+)$", Some(&[regex!(r"^-o$")]) };
-               fn set_output(this, cap) {
+tool_argument!(OUTPUT: Invocation = { r"^-o(.+)$", Some(regex!(r"^-o$")) };
+               fn set_output(this, single, cap) {
                    if this.output.is_some() {
                        return Err("more than one output specified".to_string());
                    }
 
-                   let out = cap.at(0).unwrap();
+                   let out = if single { cap.at(1).unwrap() }
+                             else      { cap.at(0).unwrap() };
                    let out = Path::new(out);
                    let out = out.to_path_buf();
                    this.output = Some(out);
@@ -100,13 +100,13 @@ tool_argument!(OUTPUT: Invocation = { r"^-o(.+)$", Some(&[regex!(r"^-o$")]) };
                });
 
 tool_argument!(ARGS: Invocation = { r"^(-.*)$", None };
-               fn add_arg(this, cap) {
+               fn add_arg(this, _single, cap) {
                    this.args.push(cap.at(0).unwrap().to_string());
                    Ok(())
                });
 
 tool_argument!(INPUTS: Invocation = { r"^(.*)$", None };
-               fn set_input(this, cap) {
+               fn set_input(this, _single, cap) {
                    if this.output.is_some() {
                        return Err("more than one input specified".to_string());
                    }

@@ -1,21 +1,109 @@
 [root]
+name = "pnacl-drivers"
+version = "0.0.0"
+dependencies = [
+ "pnacl-clang-driver 0.0.0",
+ "pnacl-ld-driver 0.0.0",
+ "pnacl-opt-driver 0.0.0",
+ "pnacl-util 0.0.0",
+]
+
+[[package]]
+name = "aho-corasick"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "memchr 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "byteorder"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "elf"
+version = "0.0.4"
+source = "git+https://github.com/DiamondLovesYou/rust-elf.git#29507f31fefe6de18ab2005401f6dce66cba4c59"
+dependencies = [
+ "byteorder 0.3.10 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "libc"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "maplit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "memchr"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "libc 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "pnacl-clang-driver"
 version = "0.0.0"
 dependencies = [
- "regex 0.1.28 (registry+https://github.com/rust-lang/crates.io-index)",
- "regex_macros 0.1.15 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pnacl-ld-driver 0.0.0",
+ "pnacl-util 0.0.0",
+]
+
+[[package]]
+name = "pnacl-ld-driver"
+version = "0.0.0"
+dependencies = [
+ "pnacl-opt-driver 0.0.0",
+ "pnacl-util 0.0.0",
+ "regex 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex_macros 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "pnacl-opt-driver"
+version = "0.0.0"
+dependencies = [
+ "pnacl-util 0.0.0",
+ "regex 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex_macros 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "pnacl-util"
+version = "0.0.0"
+dependencies = [
+ "elf 0.0.4 (git+https://github.com/DiamondLovesYou/rust-elf.git)",
+ "maplit 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex_macros 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "regex"
-version = "0.1.28"
+version = "0.1.40"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "aho-corasick 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "memchr 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex-syntax 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "regex_macros"
-version = "0.1.15"
+version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
- "regex 0.1.28 (registry+https://github.com/rust-lang/crates.io-index)",
+ "regex 0.1.40 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
