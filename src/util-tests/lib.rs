@@ -1,12 +1,12 @@
-#![feature(plugin)]
-#![plugin(regex_macros)]
-
+use std::error::Error;
 use std::path::PathBuf;
 
 extern crate regex;
 
 #[macro_use]
 extern crate util;
+#[macro_use]
+extern crate lazy_static;
 
 use util::{Tool, ToolInvocation, CommandQueue, ToolArgs};
 use util::process_invocation_args;
@@ -27,7 +27,7 @@ impl Default for Test {
 }
 
 impl Tool for Test {
-    fn enqueue_commands(&mut self, _queue: &mut CommandQueue) -> Result<(), String> { unimplemented!() }
+    fn enqueue_commands(&mut self, _queue: &mut CommandQueue) -> Result<(), Box<Error>> { unimplemented!() }
 
     fn get_name(&self) -> String { "test".to_string() }
 
@@ -36,28 +36,28 @@ impl Tool for Test {
 }
 
 argument!(impl SINGLE where { Some(r"^-?-single=(.+)$"), None } for Test {
-    fn set_single(this, cap) {
-        this.arg = Some(cap.at(1).unwrap().to_string());
+    fn set_single(this, _is_single, cap) {
+        this.arg = Some(cap.get(1).unwrap().as_str().to_string());
     }
 });
 argument!(impl SPLIT where { None, Some(r"^-?-split") } for Test {
-    fn set_split(this, cap) {
-        this.arg = Some(cap.at(0).unwrap().to_string());
+    fn set_split(this, _is_single, cap) {
+        this.arg = Some(cap.get(0).unwrap().as_str().to_string());
     }
 });
 argument!(impl BOTH where { Some(r"^-(both|single_only)(.+)$"), Some(r"^-(both|split_only)$") } for Test {
-    fn set_both(this, cap) {
+    fn set_both(this, is_single, cap) {
         let index;
-        if cap.at(2).is_none() {
+        if is_single {
             index = 1;
         } else {
             index = 2;
         }
-        this.arg = Some(cap.at(index).unwrap().to_string());
+        this.arg = Some(cap.get(index).unwrap().as_str().to_string());
     }
 });
 argument!(impl ERROR where { Some(r"^--error$"), None } for Test {
-    fn set_error(_this, _cap) {
+    fn set_error(_this, _is_single, _cap) {
         return Err("error".to_string());
     }
 });
@@ -74,9 +74,12 @@ impl ToolInvocation for Test {
     fn args(&self, iteration: usize) -> Option<ToolArgs<Self>> {
         match iteration {
             0 => {
-                static ARGS: ToolArgs<Test> = &[&SINGLE, &SPLIT,
-                                                &BOTH, &ERROR];
-                Some(ARGS)
+              lazy_static! {
+                static ref ARGS: ToolArgs<Test> = [
+                  &SINGLE, &SPLIT, &BOTH, &ERROR,
+                ];
+              }
+              Some(&ARGS[..])
             },
             _ => None,
         }

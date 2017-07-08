@@ -1,0 +1,20 @@
+[package]
+authors = ["Richard Diamond <wichard@vitalitystudios.com>"]
+name = "cmake"
+version = "0.1.0"
+
+[[bin]]
+name = "wasm-cmake"
+path = "src/main.rs"
+
+[dependencies]
+lazy_static = "0.2.8"
+regex = "0.2.2"
+
+[dependencies.util]
+optional = false
+path = "../util"
+
+[lib]
+name = "cmake_driver"
+path = "src/lib.rs"

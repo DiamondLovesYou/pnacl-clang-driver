@@ -1,0 +1,28 @@
+[package]
+license = "MIT"
+name = "clang-driver"
+repository = ""
+version = "0.0.0"
+
+[[bin]]
+name = "wasm-clang"
+path = "src/main.rs"
+[[bin]]
+name = "wasm-clangxx"
+path = "src/main.rs"
+
+[dependencies]
+lazy_static = "0.2.8"
+regex = "0.2.2"
+
+[dependencies.ld-driver]
+path = "../ld"
+version = "*"
+
+[dependencies.util]
+path = "../util"
+version = "*"
+
+[lib]
+name = "clang_driver"
+path = "src/lib.rs"

@@ -1,0 +1,23 @@
+[package]
+license = "MIT"
+name = "ld-driver"
+repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
+version = "0.0.0"
+
+[[bin]]
+name = "wasm-ld"
+path = "src/main.rs"
+
+[dependencies]
+ar = "0.3.0"
+lazy_static = "0.2.8"
+regex = "*"
+tempdir = "0.3.5"
+
+[dependencies.util]
+path = "../util"
+version = "*"
+
+[lib]
+name = "ld_driver"
+path = "src/lib.rs"

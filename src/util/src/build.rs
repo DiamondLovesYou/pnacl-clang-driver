@@ -1,6 +1,3 @@
-#![feature(plugin)]
-#![plugin(regex_macros)]
-
 extern crate regex;
 
 use std::default::Default;
@@ -38,34 +35,38 @@ fn need_nacl_toolchain() -> PathBuf {
     }
 }
 
+const FOR_NACL_ENV: &'static str = "CARGO_FEATURE_NACL";
+
 fn main() {
+  if var_os(FOR_NACL_ENV).is_some() {
     let libs_dir = current_dir()
-        .unwrap()
-        .join("lib");
+      .unwrap()
+      .join("lib");
     println!("cargo:rustc-link-search=native={}",
              libs_dir.display());
 
     let mut rev = need_nacl_toolchain();
     rev.push("REV");
     let dest = Path::new(&var_os("OUT_DIR").unwrap())
-        .join("REV");
+      .join("REV");
 
     let mut rev = File::open(rev)
-        .unwrap();
+      .unwrap();
     let mut rev_str = Default::default();
     rev.read_to_string(&mut rev_str)
-        .unwrap();
+      .unwrap();
 
-    let re = regex!(r"\[GIT\].*/native_client(?:\.git)?:\s*([0-9a-f]{40})");
+    let re = regex::Regex::new(r"\[GIT\].*/native_client(?:\.git)?:\s*([0-9a-f]{40})").unwrap();
     let caps = re.captures(&rev_str[..])
-        .unwrap_or_else(|| {
-            panic!("woa! couldn't find the native_client revision!");
-        });
-    let only_ref = caps.at(1);
+      .unwrap_or_else(|| {
+        panic!("woa! couldn't find the native_client revision!");
+      });
+    let only_ref = caps.get(1);
     let only_ref = only_ref.expect("expected two regex captures in revision");
 
     let mut dest = File::create(dest)
-        .unwrap();
+      .unwrap();
 
-    (write!(dest, " nacl-version={}", only_ref)).unwrap();
+    (write!(dest, " nacl-version={}", only_ref.as_str())).unwrap();
+  }
 }
