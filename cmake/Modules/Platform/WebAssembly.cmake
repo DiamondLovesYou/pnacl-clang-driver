@@ -86,13 +86,8 @@ endif()
 if ("${CMAKE_CXX_COMPILER}" STREQUAL "")
 	set(CMAKE_CXX_COMPILER "wasm-clang++${EMCC_SUFFIX}")
 endif()
-
-if ("${CMAKE_AR}" STREQUAL "")
-	set(CMAKE_AR "${EMSCRIPTEN_ROOT_PATH}/emar${EMCC_SUFFIX}" CACHE FILEPATH "Emscripten ar")
-endif()
-
-if ("${CMAKE_RANLIB}" STREQUAL "")
-	set(CMAKE_RANLIB "${EMSCRIPTEN_ROOT_PATH}/emranlib${EMCC_SUFFIX}" CACHE FILEPATH "Emscripten ranlib")
+if ("${CMAKE_LINKER}" STREQUAL "")
+    set(CMAKE_LINKER "wasm-ld${EMCC_SUFFIX")
 endif()
 
 # Don't allow CMake to autodetect the compiler, since it does not understand Emscripten.

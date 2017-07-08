@@ -299,6 +299,7 @@ impl util::ToolInvocation for Invocation {
 impl util::Tool for Invocation {
   fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>> {
     use std::fs::File;
+    use std::env::home_dir;
     use std::io::{copy, Write};
     use std::process::Command;
 
@@ -351,9 +352,16 @@ impl util::Tool for Invocation {
       queue.enqueue_external(Some("llc"), cmd, Some("-o"), false,
                              None);
 
+      let emscripten_cache = home_dir().unwrap()
+        .join(".emscripten_cache/wasm");
       let mut cmd = Command::new(self.tc.binaryen_tool("s2wasm"));
       cmd.arg("--binary")
-        .arg("--dylink");
+        .arg("--dylink")
+        .arg("-l")
+        .arg(emscripten_cache.join("wasm_compiler_rt.a"))
+        .arg("-l")
+        .arg(emscripten_cache.join("wasm_libc_rt.a"));
+
       queue.enqueue_external(Some("s2wasm"), cmd, Some("-o"), false,
                              None);
     }
