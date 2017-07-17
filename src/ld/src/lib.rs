@@ -1,5 +1,6 @@
 
 use std::error::Error;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use util::{Arch, CommandQueue};
@@ -229,7 +230,7 @@ impl Invocation {
             // for debugging.
             writeln!(std::io::stderr(),
                      "warning: native code is never allowed: {}",
-                     p.display())?;
+                     file.display())?;
             continue 'outer;
           }
         }
