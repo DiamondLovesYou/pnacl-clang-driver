@@ -2,8 +2,8 @@
 use std::env::{var_os};
 use std::path::{Path, PathBuf};
 
-const BINARYEN_ROOT_ENV: &'static str = "BINARYEN_ROOT";
-const EMSCRIPTEN_ROOT_ENV: &'static str = "EMSCRIPTEN_ROOT";
+const BINARYEN_ROOT_ENV: &'static str = "BINARYEN";
+const EMSCRIPTEN_ROOT_ENV: &'static str = "EMSCRIPTEN";
 const LLVM_ROOT_ENV: &'static str = "LLVM_ROOT";
 
 #[derive(Clone, Debug)]
@@ -50,6 +50,12 @@ impl WasmToolchain {
       .to_path_buf()
   }
   // we use no emscripten tools
+
+  pub fn emscripten_cache(&self) -> PathBuf {
+    use std::env::home_dir;
+    home_dir().unwrap()
+      .join(".emscripten_cache/wasm")
+  }
 }
 impl Default for WasmToolchain {
   fn default() -> Self {

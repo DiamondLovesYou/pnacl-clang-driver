@@ -164,6 +164,8 @@ pub struct Invocation {
 
   verbose: bool,
   run_queue: Vec<Command>,
+
+  print_version: bool,
 }
 
 impl Default for Invocation {
@@ -202,38 +204,10 @@ impl Invocation {
 
       verbose: false,
       run_queue: Default::default(),
+      print_version: false,
     }
   }
 
-  fn print_version(&self) {
-    //use std::process::Stdio;
-
-    let mut clang_ver = self.clang_base_cmd();
-    //clang_ver.stdout(Stdio::piped());
-    self.clang_add_std_args(&mut clang_ver);
-    clang_ver.arg("--version");
-
-    if self.verbose {
-      println!("running `{:?}`:", clang_ver);
-    }
-
-    clang_ver.spawn().unwrap().wait().unwrap();
-
-    /*let out = clang_ver.output().unwrap();
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut add_nacl_version = Some(util::SDK_VERSION);
-    for line in stdout
-      .lines_any()
-      .map(|l| {
-        match add_nacl_version.take() {
-          Some(rev) => format!("{}{}", l, rev),
-          None => l.to_string(),
-        }
-      }) {
-      println!("{}", line);
-    }*/
-  }
   fn print_help(&self) {
     // TODO print more info about what *this* driver does and doesn't support.
     print!("
@@ -293,6 +267,7 @@ BASIC OPTIONS:
           .to_path_buf();
         isystem.push(cxx_inc);
       }
+      isystem.push(system.join("compat").to_path_buf());
       isystem.push(system.join("libc").to_path_buf());
       for clang_ver in ["5.0.0"].iter() {
         let c_inc = self.tc.llvm
@@ -309,17 +284,23 @@ BASIC OPTIONS:
       .collect()
   }
 
-  fn get_default_lib_args(&self) -> Vec<String> {
-    if self.no_default_libs {
-      vec![]
-    } else {
-      let mut libs = Vec::new();
-      libs.push("-L/lib".to_string());
-      libs.push("--start-group".to_string());
-      libs.push("-lc++".to_string());
+  fn get_default_lib_args(&self) -> Vec<PathBuf> {
+    let mut libs = Vec::new();
+    libs.push(PathBuf::from("-L"));
+    libs.push(self.tc.emscripten_cache());
+    if self.no_default_libs || self.no_std_lib {
       libs
-    };
-    unimplemented!();
+    } else {
+      match self.driver_mode {
+        DriverMode::CXX => {
+          libs.push(PathBuf::from("-lc++"));
+        },
+        _ => {}
+      }
+      libs.push(PathBuf::from("-lc"));
+      libs.push(PathBuf::from("-ldlmalloc"));
+      libs
+    }
   }
 
   fn set_gcc_mode(&mut self, mode: GccMode) {
@@ -396,14 +377,22 @@ BASIC OPTIONS:
   }
 
   fn clang_add_std_args(&self, cmd: &mut Command) {
+    cmd.args(&[
+      "-target", "wasm32-unknown-unknown",
+      "-mthread-model", "single",
+    ]);
+
+    if self.print_version {
+      return;
+    }
+
     self.optimization.check();
-    cmd.arg(format!("-O{}", self.optimization));
+    cmd.arg(format!("{}", self.optimization));
     cmd.args(&[
       "-nostdinc",
       "-D__EMSCRIPTEN__",
       "-Dasm=ASM_FORBIDDEN",
       "-D__asm__=ASM_FORBIDDEN",
-      "-target", "wasm32-unknown-unknown"
     ]);
     if !self.is_pch_mode() {
       cmd.arg("-emit-llvm");
@@ -443,11 +432,6 @@ BASIC OPTIONS:
       cmd.arg(filename);
     }
   }
-  fn clang_add_output_args(&self, cmd: &mut Command) {
-    let out = self.get_output();
-    cmd.arg("-o");
-    cmd.arg(out);
-  }
 
   fn queue_clang(&mut self, queue: &mut CommandQueue) {
     // build the cmd:
@@ -455,7 +439,6 @@ BASIC OPTIONS:
       let mut cmd = self.clang_base_cmd();
       self.clang_add_std_args(&mut cmd);
       self.clang_add_input_args(&mut cmd);
-      self.clang_add_output_args(&mut cmd);
 
       queue.enqueue_external(Some("clang"), cmd,
                              Some("-o"), false,
@@ -490,141 +473,11 @@ BASIC OPTIONS:
     let inputs = self.inputs.iter()
       .map(|&(ref f, _)| format!("{}", f.display()) );
     args.extend(inputs);
+    args.push("-target".to_string());
+    args.push("wasm32-unknown-unknown".to_string());
     Ok(queue.enqueue_tool(Some("linker"),
                           ld, args, false,
                           None)?)
-  }
-
-
-  fn process_args<'a, T>(&mut self, mut raw_args: T) -> bool
-    where T: Iterator,
-          <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>,
-          for<'b> <T as Iterator>::Item: From<&'b str>,
-  {
-    use util::expect_next;
-    let mut file_lang;
-
-    loop {
-      let arg_anchor = raw_args.next();
-      if arg_anchor.is_none() { break; }
-      let arg_anchor = arg_anchor.unwrap();
-      let arg = arg_anchor.as_ref();
-
-      file_lang = None;
-
-      if arg == "-h" || arg == "--help" {
-        self.print_help();
-        return false;
-      } else if arg == "--help-full" {
-        self.print_clang_help();
-        return false;
-      } else if arg == "--version" {
-        self.print_version();
-        return false;
-      }
-
-      if arg == "-fPIC" || arg == "-Qy" || arg == "--traditional-format" ||
-        arg.ends_with("-gstabs") || arg.ends_with("-gdwarf2") ||
-        arg == "--fatal-warnings" || arg.starts_with("-meabi=") ||
-        arg.starts_with("-mfpu=") || arg == "-m32" || arg == "-emit-llvm" ||
-        arg == "-msse" || arg == "-pipe" {
-        // ignore.
-        continue;
-      }
-
-      pub fn get_target<'a, T>(arg: &str, args: &mut T) -> Option<<T as Iterator>::Item>
-        where T: Iterator,
-              <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>,
-              for<'b> <T as Iterator>::Item: From<&'b str>,
-      {
-        if arg == "-target" {
-          Some(expect_next(args))
-        } else if arg.starts_with("--target=") {
-          Some(arg[8..].into())
-        } else {
-          None
-        }
-      }
-
-      if let Some(target) = get_target(arg, &mut raw_args) {
-        let t = target.as_ref();
-        if !t.starts_with("wasm32") && !t.starts_with("wasm64") {
-          panic!("this driver must be used to target WebAssembly");
-        }
-      } else if arg == "-allow-asm" {
-        panic!("can't have asm");
-      }
-
-      if arg == "-I" {
-        self.add_driver_arg(format!("-I{}",
-                                    expect_next(&mut raw_args).as_ref()));
-      } else if arg.starts_with("-I") {
-        self.add_driver_arg(arg);
-      } else if arg == "-isystem" {
-        self.add_driver_arg(format!("-isystem{}",
-                                    expect_next(&mut raw_args).as_ref()));
-      } else if arg.starts_with("-isystem") {
-        self.add_driver_arg(arg);
-      } else if arg == "-isysroot" {
-        self.add_driver_arg(arg);
-        self.add_driver_arg(expect_next(&mut raw_args));
-      } else if arg.starts_with("-isysroot") {
-        self.add_driver_arg("-isysroot");
-        self.add_driver_arg(&arg[8..].to_owned());
-      } else if arg == "-iquote" {
-        self.add_driver_arg(arg);
-        self.add_driver_arg(expect_next(&mut raw_args));
-      } else if arg.starts_with("-iquote") {
-        self.add_driver_arg("-iquote");
-        self.add_driver_arg(&arg[7..].to_owned());
-      } else if arg == "-idirafter" {
-        self.add_driver_arg(format!("-idirafter{}",
-                                    expect_next(&mut raw_args).as_ref()));
-      } else if arg.starts_with("-idirafter") {
-        self.add_driver_arg(&arg[..]);
-      } else if arg.starts_with("-mfloat-abi=") {
-        self.add_driver_arg(arg);
-      } else if arg.starts_with("-f") {
-        self.add_driver_arg(arg);
-      } else if arg == "-arch" {
-        let arch = expect_next(&mut raw_args);
-        if arch != "wasm32" && arch != "wasm64" {
-          panic!("-arch must use `wasm32` or `wasm64`");
-        }
-      } else if arg == "-c" {
-        self.set_gcc_mode(GccMode::Dashc);
-      } else if arg == "-E" {
-        self.set_gcc_mode(GccMode::DashE);
-      } else if arg.starts_with("-Wl,") {
-        self.add_linker_arg(&arg[4..]);
-      } else if arg == "-l" {
-        self.add_linker_arg(format!("-l{}",
-                                    expect_next(&mut raw_args).as_ref()));
-      } else if arg == "-Xlinker" {
-        self.add_linker_arg(format!("-Xlinker={}",
-                                    expect_next(&mut raw_args).as_ref()));
-      } else if arg.starts_with("-l") ||
-        arg == "-Bstatic" || arg == "-Bdynamic" {
-        self.add_linker_arg(arg);
-      } else if arg == "-shared" {
-        self.shared = true;
-      } else if arg == "-o" {
-        self.set_output(expect_next(&mut raw_args).as_ref());
-      } else if arg.starts_with("-o") {
-        self.set_output(&arg[2..]);
-      } else if arg == "-v" {
-        self.set_verbose();
-      } else if arg == "-g" {
-        self.add_driver_arg(arg);
-      } else if !&arg[..].starts_with("-") || arg == "-" {
-        self.add_input_file(arg, file_lang.clone());
-      } else {
-        panic!("unknown argument: `{}`",
-               arg);
-      }
-    }
-
-    return true;
   }
 
   fn add_driver_arg<T: AsRef<str>>(&mut self, arg: T) {
@@ -653,12 +506,22 @@ BASIC OPTIONS:
 
 impl Tool for Invocation {
   fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>> {
+    if self.print_version {
+      let mut clang_ver = self.clang_base_cmd();
+      self.clang_add_std_args(&mut clang_ver);
+      clang_ver.arg("-v");
+      queue.enqueue_external(Some("clang"), clang_ver, None, true, None);
+      return Ok(());
+    }
+
     if self.gcc_mode.is_some() {
       self.queue_clang(queue);
     }
 
     if self.should_link_output() {
       self.queue_ld(queue)?;
+
+
     }
 
     Ok(())
@@ -674,19 +537,24 @@ impl Tool for Invocation {
   }
 
   fn get_output(&self) -> Option<&PathBuf> {
-    self.output.as_ref()
+    if self.print_version {
+      None
+    } else {
+      self.output.as_ref()
+    }
   }
   fn override_output(&mut self, out: PathBuf) {
     self.output = Some(out);
   }
 }
 impl ToolInvocation for Invocation {
-  fn check_state(&mut self, _iteration: usize) -> Result<(), Box<Error>> {
+  fn check_state(&mut self, _iteration: usize, _skip_inputs_check: bool) -> Result<(), Box<Error>> {
     Ok(())
   }
   fn args(&self, iteration: usize) -> Option<ToolArgs<Self>> {
     match iteration {
       0 => tool_arguments!(Invocation => [
+        VERSION,
         F_POSITION_INDEPENDENT_CODE,
         IGNORED0,
         IGNORED1,
@@ -708,17 +576,25 @@ impl ToolInvocation for Invocation {
         DIR_AFTER_INCLUDE,
         M_FLOAT_ABI,
         F_FLAGS,
+        D_FLAGS,
+        W_FLAGS,
+        CAP_M_FLAGS,
+        CAP_MF_FLAGS,
+        CAP_MT_FLAGS,
+        PEDANTIC,
         LINKER_FLAGS0,
         LINKER_FLAGS1,
         SHARED,
         SEARCH_PATH,
         LIBRARY,
+        STD_VERSION,
         OPTIMIZE_FLAG,
         DEBUG_FLAGS,
+        COMPILE, PREPROCESS,
         OUTPUT,
         UNSUPPORTED,
       ]),
-
+      2 => tool_arguments!(Invocation => [INPUTS,]),
       _ => None,
     }
   }
@@ -832,17 +708,68 @@ argument!(impl DIR_AFTER_INCLUDE where { Some(r"^-idirafter(.+)$"), Some(r"^-idi
       this.add_driver_arg(arg);
     }
 });
+argument!(impl STD_VERSION where { Some(r"^-std=(.+)$"), None } for Invocation {
+    fn std_version_arg(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg(arg);
+    }
+});
 argument!(impl M_FLOAT_ABI where { Some(r"^-mfloat-abi=(.+)$"), Some(r"^-mfloat-abi$") } for Invocation {
     fn m_float_abi(this, single, cap) {
       let dir = cap.get(if single { 1 } else { 0 })
         .unwrap().as_str();
 
-      let arg = format!("-mfloat-abi{}", dir);
+      let arg = format!("-mfloat-abi={}", dir);
       this.add_driver_arg(arg);
     }
 });
 argument!(impl F_FLAGS where { Some(r"^-f(.+)$"), None } for Invocation {
     fn f_flags(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg(arg.to_string());
+    }
+});
+argument!(impl D_FLAGS where { Some(r"^-D(.+)$"), None } for Invocation {
+    fn define_flags(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg(arg.to_string());
+    }
+});
+argument!(impl W_FLAGS where { Some(r"^-W(.*)$"), None } for Invocation {
+    fn warning_flags(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg(arg.to_string());
+    }
+});
+argument!(impl CAP_M_FLAGS where { Some(r"^-M([^FTQ]?|MD)$"), None } for Invocation {
+    fn cap_m_args(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg(arg.to_string());
+    }
+});
+argument!(impl CAP_MF_FLAGS where { None, Some(r"^-MF$") } for Invocation {
+    fn cap_mf_args(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg("-MF");
+      this.add_driver_arg(arg);
+    }
+});
+argument!(impl CAP_MT_FLAGS where { None, Some(r"^-MT$") } for Invocation {
+    fn cap_mt_args(this, _single, cap) {
+      let arg = cap.get(0)
+        .unwrap().as_str();
+      this.add_driver_arg("-MT");
+      this.add_driver_arg(arg);
+    }
+});
+argument!(impl PEDANTIC where { Some(r"^-(no-)?pedantic$"), None } for Invocation {
+    fn pedantic_arg(this, _single, cap) {
       let arg = cap.get(0)
         .unwrap().as_str();
       this.add_driver_arg(arg.to_string());
@@ -868,6 +795,16 @@ argument!(impl SHARED where { Some(r"^-shared$"), None } for Invocation {
       this.shared = true;
     }
 });
+argument!(impl COMPILE where { Some(r"^-c$"), None } for Invocation {
+  fn compile_flag(this, _single, _cap) {
+    this.gcc_mode = Some(GccMode::Dashc);
+  }
+});
+argument!(impl PREPROCESS where { Some(r"^-E$"), None } for Invocation {
+  fn preprocess_flag(this, _single, _cap) {
+    this.gcc_mode = Some(GccMode::DashE);
+  }
+});
 tool_argument!(SEARCH_PATH: Invocation = { Some(r"^-L(.+)$"), Some(r"^-(L|-library-path)$") };
                fn add_search_path(this, _single, cap) {
                  this.add_linker_arg(cap.get(0).unwrap().as_str().to_string());
@@ -881,7 +818,7 @@ tool_argument!(LIBRARY: Invocation = { Some(r"^-l(.+)$"), Some(r"^-(l|-library)$
 
 tool_argument!(OPTIMIZE_FLAG: Invocation = { Some(r"^-O([0-4sz]?)$"), None };
                fn set_optimize(this, _single, cap) {
-                   this.optimization = cap.get(0)
+                   this.optimization = cap.get(1)
                        .and_then(|str| util::OptimizationGoal::parse(str.as_str()) )
                        .unwrap();
                    Ok(())
@@ -893,7 +830,7 @@ argument!(impl DEBUG_FLAGS where { Some(r"^-g$"), None } for Invocation {
       this.add_driver_arg(arg.to_string());
     }
 });
-tool_argument!(OUTPUT: Invocation = { Some(r"-o(.+)"), Some(r"-(o|-output)") };
+tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$") };
                fn set_output(this, single, cap) {
                    if this.output.is_some() {
                        Err("more than one output specified")?;
@@ -911,4 +848,15 @@ argument!(impl UNSUPPORTED where { Some(r"^-.+$"), None } for Invocation {
         Err("unsupported argument")?;
     }
 });
-
+argument!(impl VERSION where { Some(r"^-v$"), None } for Invocation {
+  fn version_flag(this, _single, _cap) {
+    this.print_version = true;
+  }
+});
+tool_argument!(INPUTS: Invocation = { Some(r"^(.+)$"), None };
+               fn add_input(this, _single, cap) {
+                 let p = cap.get(0).unwrap().as_str();
+                 let p = Path::new(p).to_path_buf();
+                 this.add_input_file(p, None);
+                 Ok(())
+               });

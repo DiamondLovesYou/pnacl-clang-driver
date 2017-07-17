@@ -190,18 +190,22 @@ impl Invocation {
   /// Add a non-flag input.
   pub fn add_input(&mut self, input: Input) -> Result<(), Box<Error>> {
     use util::ldtools::*;
-    use util::filetype::is_file_native;
+    use util::filetype::{file_type, Type, Subtype};
     let expanded = expand_input(input, &self.search_paths[..], false)?;
-    for input in expanded.into_iter() {
-      let into = 'outer: loop {
+    'outer: for input in expanded.into_iter() {
+      let into = 'inner: loop {
         let file = match &input {
           &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
-          &Input::Library(_, _, ty) => {
+          &Input::Library(_, ref p, ty) => {
             if ty == AllowedTypes::Native {
-              self.check_native_allowed()?;
-              break &mut self.native_inputs;
+              writeln!(std::io::stderr(),
+                       "warning: native code is never allowed: {}",
+                       p.display())?;
+              continue 'outer;
+              //
             } else {
-              break &mut self.bitcode_inputs;
+              self.has_bitcode_inputs = true;
+              break 'inner &mut self.bitcode_inputs;
             }
           },
           &Input::Flag(ref _flag) => {
@@ -210,11 +214,24 @@ impl Invocation {
           &Input::File(ref path) => path,
         };
 
-        if is_file_native(file) {
-          self.check_native_allowed()?;
-          break &mut self.native_inputs;
-        } else {
-          break &mut self.bitcode_inputs;
+        let t = file_type(file.as_path())?;
+        match t {
+          Some(Type::Object(Subtype::Bitcode)) |
+          Some(Type::Archive(Subtype::Bitcode)) => {
+            self.has_bitcode_inputs = true;
+            break 'inner &mut self.bitcode_inputs;
+          },
+          Some(Type::Wasm) => {
+            // These aren't linked.
+            continue 'outer;
+          },
+          _ => {
+            // for debugging.
+            writeln!(std::io::stderr(),
+                     "warning: native code is never allowed: {}",
+                     p.display())?;
+            continue 'outer;
+          }
         }
       };
 
@@ -224,11 +241,13 @@ impl Invocation {
   }
 
   fn check_native_allowed(&self) -> Result<(), Box<Error>> {
-    Ok(Err("native code is never allowed")?)
+    /// this is a panic for debugging purposes.
+    /// TODO this should probably not be a panic.
+    Ok(panic!("native code is never allowed"))
   }
 
   pub fn add_native_ld_flag(&mut self, flag: &str) -> Result<(), Box<Error>> {
-    try!(self.check_native_allowed());
+    self.check_native_allowed()?;
 
     self.ld_flags_native.push(flag.to_string());
     Ok(())
@@ -242,7 +261,7 @@ impl Invocation {
 }
 
 impl util::ToolInvocation for Invocation {
-  fn check_state(&mut self, iteration: usize) -> Result<(), Box<Error>> {
+  fn check_state(&mut self, iteration: usize, skip_inputs_check: bool) -> Result<(), Box<Error>> {
     match iteration {
       0 => {
         if self.allow_native && self.arch.is_none() {
@@ -254,13 +273,13 @@ impl util::ToolInvocation for Invocation {
           // lol
         }
       },
-      1 => {
+      1 if !skip_inputs_check => {
         if !self.has_native_inputs() && !self.has_bitcode_inputs() {
           Err("no inputs")?;
         }
       },
 
-      _ => unreachable!(),
+      _ => {},
     }
 
     Ok(())
@@ -343,7 +362,7 @@ impl util::Tool for Invocation {
                              Some(tmpdirs));
 
       let mut cmd = Command::new(self.tc.llvm_tool("llc"));
-      cmd.arg(format!("-march={}", self.get_arch().llvm_arch()))
+      cmd.arg(format!("-march={}", self.get_arch().llvm_arch().unwrap()))
         .arg("-filetype=asm")
         .arg("-asm-verbose=true")
         .arg("-thread-model=single")
@@ -381,25 +400,25 @@ impl util::Tool for Invocation {
   fn override_output(&mut self, out: PathBuf) { self.output = Some(out); }
 }
 
-tool_argument!(TARGET: Invocation = { Some(r"--target=(.+)"), Some(r"-target") };
+tool_argument!(TARGET: Invocation = { Some(r"^--?target=(.+)$"), Some(r"^--?target$") };
                fn set_target(this, single, cap) {
                    if this.arch.is_some() {
                        Err("the target has already been set")?;
                    }
-                   let arch = if single { cap.get(1).unwrap() }
-                              else      { cap.get(0).unwrap() };
+                   let arch = if single { cap.get(0).unwrap() }
+                              else      { cap.get(1).unwrap() };
                    let arch = try!(util::Arch::parse_from_triple(arch.as_str()));
                    this.arch = Some(arch);
                    Ok(())
                });
-tool_argument!(OUTPUT: Invocation = { Some(r"-o(.+)"), Some(r"-(o|-output)") };
+tool_argument!(OUTPUT: Invocation = { Some(r"-o(.+)"), Some(r"^-(o|-output)$") };
                fn set_output(this, single, cap) {
                    if this.output.is_some() {
                        Err("more than one output specified")?;
                    }
 
-                   let out = if single { cap.get(1).unwrap() }
-                             else      { cap.get(0).unwrap() };
+                   let out = if single { cap.get(0).unwrap() }
+                             else      { cap.get(1).unwrap() };
                    let out = Path::new(out.as_str());
                    let out = out.to_path_buf();
                    this.output = Some(out);
@@ -594,15 +613,20 @@ tool_argument!(STRIP_DEBUG_FLAG: Invocation = { Some(r"^(-S|--strip-debug)$"), N
                    Ok(())
                });
 
-tool_argument!(LIBRARY: Invocation = { Some(r"^-l(.+)$"), Some(r"^-(l|-library)$") };
+tool_argument!(LIBRARY: Invocation = { Some(r"^-l([^:]+)$"), Some(r"^-(l|-library)$") };
                fn add_library(this, single, cap) {
                  let i = if single {
                    0
                  } else {
-                   1
+                   2
                  };
                  let path = Path::new(cap.get(i).unwrap().as_str()).to_path_buf();
                  this.add_input(Input::Library(false, path, AllowedTypes::Any))
+               });
+tool_argument!(ABS_LIBRARY: Invocation = { Some(r"^-l:(.+)$"), None };
+               fn add_abs_library(this, _single, cap) {
+                 let path = Path::new(cap.get(1).unwrap().as_str()).to_path_buf();
+                 this.add_input(Input::Library(true, path, AllowedTypes::Any))
                });
 
 fn add_input_flag<'str>(this: &mut Invocation,
@@ -671,7 +695,7 @@ mod tests {
     let args = vec!["-unsupported-flag".to_string()];
     let mut i: Invocation = Default::default();
 
-    assert!(util::process_invocation_args(&mut i, args).is_err());
+    assert!(util::process_invocation_args(&mut i, args, false).is_err());
   }
 
   #[test]
@@ -687,7 +711,7 @@ mod tests {
                     "--end-group".to_string()];
     let mut i: Invocation = Default::default();
     i.search_paths.push(From::from("."));
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
 
     println!("{:?}", i);
 
@@ -715,7 +739,7 @@ mod tests {
     i.allow_native = true;
     i.arch = Some(util::Arch::X8664);
     i.search_paths.push(From::from("."));
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
 
     println!("{:?}", i);
 
@@ -738,7 +762,7 @@ mod tests {
     let args = vec!["input0.bc".to_string(),
                     "input1.bc".to_string()];
     let mut i: Invocation = Default::default();
-    util::process_invocation_args(&mut i, args).unwrap();
+    util::process_invocation_args(&mut i, args, false).unwrap();
 
     println!("{:?}", i);
 
@@ -750,7 +774,7 @@ mod tests {
   fn native_needs_targets() {
     let args = vec!["--pnacl-allow-native".to_string()];
     let mut i: Invocation = Default::default();
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
     println!("{:?}", i);
     assert!(res.is_err());
 
@@ -760,7 +784,7 @@ mod tests {
                     "--pnacl-allow-native".to_string(),
                     "--target=arm-nacl".to_string()];
     let mut i: Invocation = Default::default();
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
     println!("{:?}", i);
     res.unwrap();
 
@@ -773,7 +797,7 @@ mod tests {
     let args = vec!["input.o".to_string()];
     let mut i: Invocation = Default::default();
 
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
     println!("{:?}", i);
     assert!(res.is_err());
   }
@@ -781,7 +805,7 @@ mod tests {
   fn no_inputs() {
     let args = vec![];
     let mut i: Invocation = Default::default();
-    let res = util::process_invocation_args(&mut i, args);
+    let res = util::process_invocation_args(&mut i, args, false);
     println!("{:?}", i);
     assert!(res.is_err());
   }

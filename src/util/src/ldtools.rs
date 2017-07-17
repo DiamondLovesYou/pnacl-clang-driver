@@ -193,6 +193,15 @@ pub fn expand_input(input: Input, search: &[PathBuf],
       } else {
         find_file(format!("lib{}.so", path.display()), search, allowed_types)
           .or_else(|| {
+            if path == Path::new("c") {
+              find_file("libc.bc", search, allowed_types)
+            } else if path == Path::new("dlmalloc") {
+              find_file("dlmalloc.bc", search, allowed_types)
+            } else {
+              None
+            }
+          })
+          .or_else(|| {
             find_file(format!("lib{}.a", path.display()), search,
                       allowed_types)
           })
@@ -219,7 +228,7 @@ pub fn expand_input(input: Input, search: &[PathBuf],
           Input::Library(true, p, t)
         },
         None => {
-          return Err(format!("`-l{}{}` not found",
+          return Err(format!("`{}{}` not found",
                              if is_absolute { ":" } else { "" },
                              path.display()));
         },

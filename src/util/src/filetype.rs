@@ -103,8 +103,10 @@ impl<T> ReadSeek for T
 {
 }
 
-pub fn get_file_contents<T: AsRef<Path>, F, U>(path: T, f: F) ->
-io::Result<U> where F: FnOnce(&T, &mut ReadSeek) -> U,
+pub fn get_file_contents<T, F, U>(path: T, f: F)
+  -> io::Result<U>
+  where T: AsRef<Path>,
+        F: FnOnce(&T, &mut ReadSeek) -> U,
 {
   use std::fs::File;
   let opt = {
@@ -137,10 +139,30 @@ pub fn file_exists<T: AsRef<Path>>(path: T) -> bool {
     path.as_ref().exists()
 }
 
-const LLVM_BITCODE_MAGIC: &'static str = r"BC\xc0\xde";
-const LLVM_WRAPPER_MAGIC: &'static str = r"\xde\xc0\x17\x0b";
-const PNACL_BITCODE_MAGIC: &'static str = r"PEXE";
-const WASM_MAGIC: &'static str = r"\0asm";
+const LLVM_BITCODE_MAGIC: &'static [u8] = &[
+  'B' as u8,
+  'C' as u8,
+  0xc0,
+  0xde,
+];
+const LLVM_WRAPPER_MAGIC: &'static [u8] = &[
+  0xde,
+  0xc0,
+  0x17,
+  0x0b,
+];
+const PNACL_BITCODE_MAGIC: &'static [u8] = &[
+  'P' as u8,
+  'E' as u8,
+  'X' as u8,
+  'E' as u8,
+];
+const WASM_MAGIC: &'static [u8] = &[
+  0,
+  'a' as u8,
+  's' as u8,
+  'm' as u8,
+];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Subtype {
@@ -183,11 +205,13 @@ macro_rules! test_magic (
             use std::io::{SeekFrom};
             use std::mem;
 
+            let pos = io.seek(SeekFrom::Current(0)).unwrap();
+
             let mut buf: [u8; $max_size] = unsafe { mem::uninitialized() };
-            match io.read(buf.as_mut()) {
+            let read = io.read(buf.as_mut());
+            io.seek(SeekFrom::Start(pos)).unwrap();
+            match read {
                 Ok(n) => {
-                    io.seek(SeekFrom::Current(-(n as i64)))
-                        .unwrap();
                     if n != buf.len() {
                         return false;
                     }
@@ -206,18 +230,51 @@ test_magic!(is_file_wrapped_llvm_bitcode is_stream_wrapped_llvm_bitcode 4 =>
             [LLVM_WRAPPER_MAGIC] -> Type::Object(Subtype::Bitcode));
 test_magic!(is_file_pnacl_bitcode is_stream_pnacl_bitcode 4 =>
             [PNACL_BITCODE_MAGIC] -> Type::Pexe);
-test_magic!(is_file_wasm_module is_stream_wasm_module 4 => [WASM_MAGIC] -> Type::Wasm);
+test_magic!(is_file_wasm_module is_stream_wasm_module 4 =>
+            [WASM_MAGIC] -> Type::Wasm);
 
 test_magic!(is_file_llvm_bitcode is_stream_llvm_bitcode 4 =>
             [LLVM_BITCODE_MAGIC, LLVM_WRAPPER_MAGIC] -> Type::Object(Subtype::Bitcode));
+
+pub fn file_type<T>(path: T) -> io::Result<Option<Type>>
+  where T: AsRef<Path>,
+{
+  match get_cached_filetype(&path) {
+    Some(v) => { return Ok(Some(v)); },
+    _ => {},
+  }
+
+  let t = get_file_contents(&path, |_, mut file| {
+    if is_stream_llvm_bitcode(file) {
+      return Some(Type::Object(Subtype::Bitcode));
+    }
+    if is_stream_pnacl_bitcode(file) {
+      return Some(Type::Pexe);
+    }
+    if is_stream_wasm_module(file) {
+      return Some(Type::Wasm);
+    }
+
+    if let Ok(elf) = elf::File::open_stream(&mut file) {
+      return Some(Type::Object(Subtype::ELF(elf.ehdr.machine)));
+    }
+
+    if let Ok(Some(ar_type)) = ar::stream_archive_type(&mut file) {
+      return Some(Type::Archive(ar_type));
+    }
+
+    None
+  })?;
+
+  Ok(t)
+}
 
 pub fn is_file_native<T: AsRef<Path>>(path: T) -> bool {
   let cached = get_cached_filetype(&path)
     .map(|t| {
       match t {
         Type::Object(Subtype::ELF(_)) |
-        Type::Archive(Subtype::ELF(_)) |
-        Type::Pexe | Type::Wasm => true,
+        Type::Archive(Subtype::ELF(_)) => true,
         _ => false,
       }
     });
@@ -227,13 +284,15 @@ pub fn is_file_native<T: AsRef<Path>>(path: T) -> bool {
   }
 
   let is_obj_bc = get_file_contents(&path, |_, file| {
-    is_stream_raw_llvm_bitcode(file) ||
-      is_stream_wrapped_llvm_bitcode(file) ||
-      is_stream_pnacl_bitcode(file)
+    is_stream_llvm_bitcode(file) ||
+      is_stream_pnacl_bitcode(file) ||
+      is_stream_wasm_module(file)
   });
   match is_obj_bc {
-    Ok(v) if v => { return false; }
-    _ => {},
+    Ok(v) if v => {
+      return false;
+    }
+    _ => { },
   }
 
   if ar::archive_type(&path)
@@ -280,11 +339,12 @@ pub mod ar {
 
   use super::{is_stream_llvm_bitcode, get_cached_filetype,
               get_file_contents, override_filetype};
+  use super::{elf};
 
   pub use super::Subtype as Type;
 
-  const AR_MAGIC: &'static str = r"!<arch>\n";
-  const THIN_MAGIC: &'static str = r"!<thin>\n";
+  const AR_MAGIC: &'static str = "!<arch>\n";
+  const THIN_MAGIC: &'static str = "!<thin>\n";
 
   pub fn is_file_an_archive<T: AsRef<::std::path::Path>>(path: T) -> bool {
     let cached_type = get_cached_filetype(&path);
@@ -333,7 +393,10 @@ pub mod ar {
       })
       .or_else(|| {
         // XXX(rdiamond): This ignores our cache.
-        let file = File::open(path.as_ref()).unwrap();
+        let file = File::open(path.as_ref())
+          .unwrap_or_else(|err| {
+            panic!("path `{}`: `{}`", path.as_ref().display(), err);
+          });
         let mut ar = ar::Archive::new(file);
         while let Some(Ok(mut member)) = ar.next_entry() {
           let mut buffer = Vec::new();
@@ -351,6 +414,30 @@ pub mod ar {
       })
   }
 
+  pub fn stream_archive_type<T>(mut io: T) -> io::Result<Option<Type>>
+    where T: Read + Seek
+  {
+    let pos = io.seek(SeekFrom::Current(0))?;
+    let result = 'block: loop {
+      let mut ar = ar::Archive::new(&mut io);
+      let mut buffer = Vec::new();
+      while let Some(Ok(mut member)) = ar.next_entry() {
+        buffer.clear();
+        member.read_to_end(&mut buffer)?;
+        let mut stream = Cursor::new(&mut buffer);
+        if is_stream_llvm_bitcode(&mut stream) {
+          break 'block Ok(Some(Type::Bitcode));
+        } else if let Ok(elf) = elf::File::open_stream(&mut stream) {
+          break 'block Ok(Some(Type::ELF(elf.ehdr.machine)));
+        }
+      }
+
+      break 'block Ok(None);
+    };
+    io.seek(SeekFrom::Start(pos))?;
+
+    result
+  }
 
 
   pub struct MemberHeader {
@@ -441,9 +528,15 @@ pub mod elf {
   pub fn is_file_elf<T: AsRef<::std::path::Path>>(path: T) -> bool {
     elf::File::open_path(path).ok().is_some()
   }
-  pub fn is_stream_elf<T: ::std::io::Read + ::std::io::Seek>(io: &mut T) ->
-  bool
+  pub fn is_stream_elf<T>(io: &mut T) -> bool
+    where T: ::std::io::Read + ::std::io::Seek,
   {
-    elf::File::open_stream(io).ok().is_some()
+    use std::io::SeekFrom;
+
+    let pos = io.seek(SeekFrom::Current(0)).unwrap();
+    let result = elf::File::open_stream(io).ok().is_some();
+    io.seek(SeekFrom::Start(pos)).unwrap();
+
+    result
   }
 }

@@ -143,7 +143,7 @@ pub enum Arch {
 #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
 impl Default for Arch {
     fn default() -> Arch {
-        Arch::Le32
+        Arch::Wasm32
     }
 }
 #[cfg(target_arch = "wasm32")]
@@ -180,8 +180,9 @@ impl Arch {
   pub fn parse_from_triple(triple: &str) -> Result<Arch, String> {
     let mut split = triple.split('-').peekable();
 
-    fn check_triple_format<'a>(next: Option<&'a str>, triple: &str) ->
-    Result<&'a str, String>
+    fn check_triple_format<'a>(next: Option<&'a str>,
+                               triple: &str)
+      -> Result<&'a str, String>
     {
       if next.is_none() {
         return Err(format!("`{}` is an unknown target triple format",
@@ -191,7 +192,7 @@ impl Arch {
       }
     }
 
-    let arch_str = try!(check_triple_format(split.next(), triple.as_ref()));
+    let arch_str = check_triple_format(split.next(), triple.as_ref())?;
     let mut arch = None;
     for &(a, ref r) in ARCHS.iter() {
       if r.is_match(arch_str) {
@@ -215,27 +216,31 @@ impl Arch {
             }
         );
 
-    let mut os = try!(check_triple_format(split.next(), triple.as_ref()));
+    let mut os = check_triple_format(split.next(), triple.as_ref())?;
     while os == "unknown" {
-      os = try!(check_triple_format(split.next(), triple.as_ref()));
+      os = check_triple_format(split.next(), triple.as_ref())?;
+      if split.peek().is_none() {
+        break;
+      }
     }
 
-    let nacl_or_wasm = os == "nacl" || os == "wasm";
+    let nacl_or_wasm = os == "nacl" || (arch.is_wasm() && os == "unknown");
     if nacl_or_wasm && split.peek().is_none() {
       return Ok(arch);
     } else if !nacl_or_wasm && split.peek().is_none() {
       unsupported_os!(os);
     } else if nacl_or_wasm && split.peek().is_some() {
-      try!(check_triple_format(None, triple.as_ref()));
+      check_triple_format(None, triple.as_ref())?;
       unreachable!();
-    } else { unreachable!(); }
+    } else { panic!("unknown os: {}", os); }
   }
 
-  pub fn llvm_arch(&self) -> &'static str {
+  pub fn llvm_arch(&self) -> Option<&'static str> {
     match self {
-      &Arch::Wasm32 => "wasm32",
-      &Arch::Wasm64 => "wasm64",
-      _ => unimplemented!(),
+      &Arch::Wasm32 => Some("wasm32"),
+      &Arch::Wasm64 => Some("wasm64"),
+      &Arch::Le32   => Some("le32"),
+      _ => None,
     }
   }
 
@@ -257,6 +262,13 @@ impl Arch {
   pub fn is_portable(&self) -> bool {
     match self {
       &Arch::Le32 |
+      &Arch::Wasm32 |
+      &Arch::Wasm64 => true,
+      _ => false,
+    }
+  }
+  pub fn is_wasm(&self) -> bool {
+    match self {
       &Arch::Wasm32 |
       &Arch::Wasm64 => true,
       _ => false,
@@ -430,6 +442,22 @@ pub struct Command {
   pub tmp_dirs: Vec<TempDir>,
 }
 
+#[derive(Debug)]
+pub enum CommandQueueError {
+  Error(Box<Error>),
+  ProcessError(Option<i32>),
+}
+impl From<Box<Error>> for CommandQueueError {
+  fn from(v: Box<Error>) -> CommandQueueError {
+    CommandQueueError::Error(v)
+  }
+}
+impl From<std::io::Error> for CommandQueueError {
+  fn from(v: std::io::Error) -> Self {
+    CommandQueueError::Error(From::from(v))
+  }
+}
+
 pub struct CommandQueue {
     pub final_output: Option<PathBuf>,
 
@@ -484,7 +512,7 @@ impl CommandQueue {
                                                    tmp_dirs: Option<Vec<TempDir>>)
     -> Result<(), Box<Error>>
   {
-    try!(process_invocation_args(&mut invocation, args));
+    process_invocation_args(&mut invocation, args, true)?;
 
     let kind = CommandKind::Tool(box invocation as Box<Tool>);
     let command = Command {
@@ -499,7 +527,7 @@ impl CommandQueue {
     Ok(())
   }
 
-  pub fn run_all(&mut self) -> Result<(), Box<Error>> {
+  pub fn run_all(&mut self) -> Result<(), CommandQueueError> {
     let cmd_len = self.queue.len();
     let iter = self.queue.drain(..)
       .enumerate()
@@ -521,6 +549,15 @@ impl CommandQueue {
           .to_path_buf()
       };
 
+      println!("output: {}", out.display());
+
+      // touch the output file:
+      if false {
+        let _file = std::fs::File::create(out.as_path()).unwrap();
+      }
+
+      let cant_fail = cmd.cant_fail;
+
       match cmd.cmd {
         CommandKind::External(ref mut cmd, Some(out_arg)) => {
           if let Some(prev) = prev_output.take() {
@@ -534,15 +571,31 @@ impl CommandQueue {
 
           let mut child = cmd.spawn()?;
           let result = child.wait()?;
+
+          if cant_fail {
+            continue;
+          }
+
           if !result.success() {
-            panic!("todo: error message");
+            println!("command failed!");
+            return Err(CommandQueueError::ProcessError(result.code()));
           }
         },
         CommandKind::External(ref mut cmd, None) if !is_last || self.final_output.is_none() => {
+          if let Some(prev) = prev_output.take() {
+            cmd.arg(prev);
+          }
+
           let mut child = cmd.spawn()?;
           let result = child.wait()?;
+
+          if cant_fail {
+            continue;
+          }
+
           if !result.success() {
-            panic!("todo: error message");
+            println!("command failed!");
+            return Err(CommandQueueError::ProcessError(result.code()));
           }
         },
         CommandKind::External(_, None) if is_last && self.final_output.is_some() => {
@@ -612,23 +665,19 @@ impl<This> ToolArg<This> {
       };
       if self.action.is_none() {
         if self.single.is_some() &&
-          self.single.as_ref().unwrap().is_match(first_arg.as_ref())
-          {
-            Some(Ok(()))
-          } else if self.split.as_ref()
-          .map(|r| r.is_match(first_arg.as_ref()) )
-          .unwrap_or(false)
-          {
-            assert!(args.next().is_some());
-            if args.peek().is_none() {
-              let msg = format!("`{}` expects another argument",
-                                self.split.as_ref().unwrap());
-              Some(Err(From::from(msg)))
-            } else {
-              *count += 1;
-              Some(Ok(()))
-            }
+          self.single.as_ref().unwrap().is_match(first_arg.as_ref()) {
+          Some(Ok(()))
+        } else if self.split.as_ref().map(|r| r.is_match(first_arg.as_ref()) ).unwrap_or(false) {
+          assert!(args.next().is_some());
+          if args.peek().is_none() {
+            let msg = format!("`{}` expects another argument",
+                              self.split.as_ref().unwrap());
+            Some(Err(From::from(msg)))
           } else {
+            *count += 1;
+            Some(Ok(()))
+          }
+        } else {
           None
         }
       } else {
@@ -641,28 +690,25 @@ impl<This> ToolArg<This> {
           });
         if match_.is_some() {
           match_
-        } else if self.split.as_ref()
-          .map(|r| r.is_match(first_arg.as_ref()) )
-          .unwrap_or(false)
-          {
-            // This is so we can capture the next arg:
-            lazy_static! {
-                      static ref SECOND_ARG: regex::Regex = regex::Regex::new("(.+)").unwrap();
-                    };
-            assert!(args.next().is_some());
+        } else if self.split.as_ref().map(|r| r.is_match(first_arg.as_ref()) ).unwrap_or(false) {
+          // This is so we can capture the next arg:
+          lazy_static! {
+              static ref SECOND_ARG: regex::Regex = regex::Regex::new("(.+)").unwrap();
+            };
+          assert!(args.next().is_some());
 
-            if args.peek().is_none() {
-              let msg = format!("`{}` expects another argument",
-                                self.split.as_ref().unwrap());
-              Some(Err(From::from(msg)))
-            } else {
-              let cap = SECOND_ARG.captures(args.peek().unwrap().as_ref())
-                .unwrap();
-              let action_result = action(this, false, cap);
-              *count += 1;
-              Some(action_result)
-            }
+          if args.peek().is_none() {
+            let msg = format!("`{}` expects another argument",
+                              self.split.as_ref().unwrap());
+            Some(Err(From::from(msg)))
           } else {
+            let cap = SECOND_ARG.captures(args.peek().unwrap().as_ref())
+              .unwrap();
+            let action_result = action(this, false, cap);
+            *count += 1;
+            Some(action_result)
+          }
+        } else {
           None
         }
       }
@@ -678,25 +724,15 @@ impl<This> ToolArg<This> {
 }
 
 // This is an array of arrays so multiple global arg arrays can be glued together.
-pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
+pub type ToolArgs<This> = Vec<&'static ToolArg<This>>;
 
-
-#[macro_export] macro_rules! __count_args {
-  ($arg0:expr, ) => ( 1 );
-  ($arg0:expr, $($arg:expr,)+) => (
-    1 + __count_args!($($arg,)*)
-  );
-}
 #[macro_export] macro_rules! tool_arguments {
   ($ty:ty => [ $( $arg:expr, )* ]) => ({
-    lazy_static! {
-      static ref ARGS: [&'static $crate::ToolArg<$ty>; __count_args!($($arg,)*)] = [
-        $(unsafe {
-          ::std::mem::transmute(&*($arg))
-        }),*
-      ];
-    };
-    return Some(unsafe { ::std::mem::transmute(ARGS.as_ref()) });
+    return Some(vec![
+      $(unsafe {
+        ::std::mem::transmute(&*($arg))
+      }),*
+    ]);
   });
 }
 
@@ -704,10 +740,12 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
     ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
       fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
         lazy_static! {
-          pub static ref $name: ::util::ToolArg<$ty> = ::util::ToolArg {
+          pub static ref $name: ::util::ToolArg<$ty> = {
+          ::util::ToolArg {
             single: ($single_regex).map(|v| ::regex::Regex::new(v).unwrap() ),
             split: ($split).map(|v| ::regex::Regex::new(v).unwrap() ),
             action: Some($fn_name as util::ToolArgActionFn<$ty>),
+          }
           };
         }
 
@@ -719,10 +757,12 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
     };
     ($name:ident: $ty:ty = { $single_regex:expr, $split:expr }) => {
         lazy_static! {
-          pub static ref $name: ::util::ToolArg<$ty> = ::util::ToolArg {
+          pub static ref $name: ::util::ToolArg<$ty> = {
+            ::util::ToolArg {
             single: ($single_regex).map(|v| ::regex::Regex::new(v).unwrap() ),
             split: ($split).map(|v| ::regex::Regex::new(v).unwrap() ),
             action: None,
+            }
           };
         }
     }
@@ -733,11 +773,13 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
         fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
     }) => (
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+          pub static ref $name: $crate::ToolArg<$this> = {
+            $crate::ToolArg {
             single: Some(::regex::Regex::new($single).unwrap()),
             split:  None,
 
             action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+          }
           };
         }
         #[allow(unreachable_code)]
@@ -752,11 +794,12 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
         fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
     }) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+          pub static ref $name: $crate::ToolArg<$this> = {
+            $crate::ToolArg {
             single: None,
-            split:  Some(::regex::Regex::new($split).unwrap()),
-
+            split: Some(::regex::Regex::new($split).unwrap()),
             action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+            }
           };
         }
         #[allow(unreachable_code)]
@@ -771,11 +814,13 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
         fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
     }) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+          pub static ref $name: $crate::ToolArg<$this> = {
+          $crate::ToolArg {
             single: Some(::regex::Regex::new($single).unwrap()),
             split:  Some(::regex::Regex::new($split).unwrap()),
 
             action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+          }
           };
         }
         #[allow(unreachable_code)]
@@ -791,31 +836,35 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
 
     (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split:  None,
-
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+          pub static ref $name: $crate::ToolArg<$this> = {
+            $crate::ToolArg {
+              single: Some(::regex::Regex::new($single).unwrap()),
+              split: None,
+              action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+            }
           };
         }
     };
     (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
-            single: None,
-            split:  Some(::regex::Regex::new($split).unwrap()),
-
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+          pub static ref $name: $crate::ToolArg<$this> = {
+            $crate::ToolArg {
+              single: None,
+              split: Some(::regex::Regex::new($split).unwrap()),
+              action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+            }
           };
         }
     };
     (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+          pub static ref $name: $crate::ToolArg<$this> = {
+          $crate::ToolArg {
             single: Some(::regex::Regex::new($single).unwrap()),
-            split:  Some(::regex::Regex::new($split).unwrap()),
+            split: Some(::regex::Regex::new($split).unwrap()),
 
             action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+          }
           };
         }
     };
@@ -823,33 +872,37 @@ pub type ToolArgs<This> = &'static [&'static ToolArg<This>];
 
     (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
         lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split: None,
-            action: None,
+          pub static ref $name: $crate::ToolArg<$this> = {
+            $crate::ToolArg {
+              single: Some(::regex::Regex::new($single).unwrap()),
+              split: None,
+              action: None,
+            }
           };
         }
     };
     (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
       lazy_static! {
-        pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+        pub static ref $name: $crate::ToolArg<$this> = {
+          $crate::ToolArg {
             single: None,
-            split:  Some(::regex::Regex::new($split).unwrap()),
-
+            split: Some(::regex::Regex::new($split).unwrap()),
             action: None,
+          }
         };
       }
     };
     (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
       lazy_static! {
-        pub static ref $name: $crate::ToolArg<$this> = $crate::ToolArg {
+        pub static ref $name: $crate::ToolArg<$this> = {
+          $crate::ToolArg {
             single: Some(::regex::Regex::new($single).unwrap()),
-            split:  Some(r::regex::Regex::new($split).unwrap()),
-
+            split: Some(r::regex::Regex::new($split).unwrap()),
             action: None,
+          }
         };
       }
-    }
+    };
 );
 
 pub trait Tool: fmt::Debug {
@@ -866,7 +919,7 @@ pub trait Tool: fmt::Debug {
 
 /// Tool argument processing.
 pub trait ToolInvocation: Tool + Default {
-  fn check_state(&mut self, iteration: usize) -> Result<(), Box<Error>>;
+  fn check_state(&mut self, iteration: usize, skip_inputs_check: bool) -> Result<(), Box<Error>>;
 
   /// Called until `None` is returned. Put args that override errors before
   /// the the args that can have those errors.
@@ -874,7 +927,8 @@ pub trait ToolInvocation: Tool + Default {
 }
 
 pub fn process_invocation_args<T>(invocation: &mut T,
-                                  args: Vec<String>)
+                                  args: Vec<String>,
+                                  skip_inputs_check: bool)
   -> Result<(), Box<Error>>
   where T: ToolInvocation + 'static,
 {
@@ -890,13 +944,14 @@ pub fn process_invocation_args<T>(invocation: &mut T,
   let mut iteration = 0;
   let mut used: Vec<usize> = Vec::new();
   'main: loop {
-    println!("iteration `{}`", iteration);
     let next_args = invocation.args(iteration);
 
     debug_assert!(iteration != 0 || next_args.is_some());
 
     if next_args.is_none() { break; }
     let next_args = next_args.unwrap();
+
+    //println!("iteration `{}`", iteration);
 
     // (the argument that caused the error, the error msg)
     let mut errors: Vec<(String, Box<Error>)> = Default::default();
@@ -907,12 +962,22 @@ pub fn process_invocation_args<T>(invocation: &mut T,
         .map(|(_, arg)| arg )
         .peekable();
       'outer: loop {
-        if program_args_iter.peek().is_none() { break 'outer; }
-        let current_arg = program_args_iter.peek().unwrap().to_string();
-        println!("current_arg `{}`...", current_arg);
+        if program_args_iter.peek().is_none() {
+          break 'outer;
+        }
+        if !program_args.contains_key(&program_arg_id) {
+          // XXX this is bad: `program_args` is a sorted
+          // collection...
+          program_arg_id += 1;
+          continue 'outer;
+        }
+        let current_arg = program_args_iter
+          .peek()
+          .unwrap()
+          .to_string();
+        //println!("current_arg: {}", current_arg);
         'inner: for accepted_arg in next_args.iter() {
 
-          println!("checking: {:?}", accepted_arg);
           let mut args_used = 0;
 
           let check = accepted_arg.check(invocation,
@@ -921,11 +986,12 @@ pub fn process_invocation_args<T>(invocation: &mut T,
           match check {
             None => { },
             Some(res) => {
-              println!("match!");
+              //println!("checking: {:?}", accepted_arg);
               debug_assert!(args_used != 0);
               loop {
                 if args_used == 0 { break; }
 
+                //println!("matched: {:?}", program_args.get(&program_arg_id));
                 used.push(program_arg_id);
 
                 program_arg_id += 1;
@@ -963,9 +1029,8 @@ pub fn process_invocation_args<T>(invocation: &mut T,
       Err(errors_str)?;
     }
 
-    try!(invocation.check_state(iteration));
+    invocation.check_state(iteration, skip_inputs_check)?;
 
-    println!("used `{:?}`", used);
     for used in used.drain(RangeFull) {
       program_args.remove(&used);
     }
@@ -973,12 +1038,10 @@ pub fn process_invocation_args<T>(invocation: &mut T,
     iteration += 1;
   }
 
-  println!("{:?}", program_args);
-
   Ok(())
 }
 
-pub fn main_inner<T>() -> Result<(), Box<Error>>
+pub fn main_inner<T>() -> Result<(), CommandQueueError>
     where T: ToolInvocation + 'static,
 {
   use std::env;
@@ -994,13 +1057,13 @@ pub fn main_inner<T>() -> Result<(), Box<Error>>
         "--pnacl-driver-verbose" |
         "--wasm-driver-verbose" => {
           verbose = true;
-          true
+          false
         },
         "--dry-run" => {
           no_op = true;
-          true
+          false
         },
-        _ => false,
+        _ => true,
       }
     })
       .collect()
@@ -1008,56 +1071,63 @@ pub fn main_inner<T>() -> Result<(), Box<Error>>
 
   let mut invocation: T = Default::default();
 
-  try!(process_invocation_args(&mut invocation, args));
+  process_invocation_args(&mut invocation, args, false)?;
 
   let output = invocation.get_output()
     .map(|out| out.clone() );
   let mut commands = CommandQueue::new(output);
   commands.set_verbose(verbose);
   commands.set_dry_run(no_op);
-  invocation.enqueue_commands(&mut commands)
-    .unwrap();
+  invocation.enqueue_commands(&mut commands)?;
 
   commands.run_all()
 }
 
-pub fn main<T>(outs: Option<(&mut Write, &mut Write)>) -> Result<(), i32>
-    where T: ToolInvocation + 'static,
+pub fn main<T>(outs: Option<(&mut Write, &mut Write)>)
+  -> Result<(), i32>
+  where T: ToolInvocation + 'static,
 {
-    use std::io::{stdout, stderr};
-    use std::panic::catch_unwind;
+  use std::io::{stdout, stderr};
+  use std::panic::catch_unwind;
 
-    #[cfg(test)]
-    fn test_safe_exit(code: i32) -> Result<(), i32> {
-        Err(code)
+  #[cfg(test)]
+  fn test_safe_exit(code: i32) -> Result<(), i32> {
+    Err(code)
+  }
+  #[cfg(not(test))]
+  fn test_safe_exit(code: i32) -> ! {
+    ::std::process::exit(code);
+  }
+
+  let mut stdout = stdout();
+  let mut stderr = stderr();
+
+  let (_, err) = outs.unwrap_or((&mut stdout, &mut stderr));
+
+  match catch_unwind(main_inner::<T>) {
+    Ok(Err(CommandQueueError::Error(msg))) => {
+      write!(err, "{}\n", msg)
+        .unwrap();
+
+      test_safe_exit(1)
+    },
+    Ok(Err(CommandQueueError::ProcessError(code))) => {
+      if let Some(code) = code {
+        test_safe_exit(code)
+      } else {
+        test_safe_exit(1)
+      }
     }
-    #[cfg(not(test))]
-    fn test_safe_exit(code: i32) -> ! {
-        ::std::process::exit(code);
-    }
+    Ok(Ok(ok)) => Ok(ok),
+    Err(..) => {
+      writeln!(err, "Woa! It looks like something bad happened! :(")
+        .unwrap();
+      writeln!(err, "Please let us know by filling a bug at https://github.com/DiamondLovesYou/pnacl-clang-driver")
+        .unwrap();
 
-    let mut stdout = stdout();
-    let mut stderr = stderr();
-
-    let (_, err) = outs.unwrap_or((&mut stdout, &mut stderr));
-
-    match catch_unwind(main_inner::<T>) {
-        Ok(Err(msg)) => {
-            write!(err, "{}\n", msg)
-                .unwrap();
-
-            test_safe_exit(1)
-        },
-        Ok(Ok(ok)) => Ok(ok),
-        Err(..) => {
-            writeln!(err, "Woa! It looks like something bad happened! :(")
-                .unwrap();
-            writeln!(err, "Please let us know by filling a bug at https://github.com/DiamondLovesYou/pnacl-clang-driver")
-                .unwrap();
-
-            test_safe_exit(127)
-        },
-    }
+      test_safe_exit(127)
+    },
+  }
 }
 
 #[test]
@@ -1077,7 +1147,7 @@ fn main_crash_test() {
 
     fn get_name(&self) -> String { unimplemented!() }
 
-    fn add_input(&mut self, _: PathBuf) -> Result<(), Box<Error>> { Ok(()) }
+    fn add_tool_input(&mut self, _: PathBuf) -> Result<(), Box<Error>> { Ok(()) }
 
     fn get_output(&self) -> Option<&PathBuf> { unimplemented!() }
     fn override_output(&mut self, out: PathBuf)  { unimplemented!() }
@@ -1085,7 +1155,7 @@ fn main_crash_test() {
 
   /// Tool argument processing.
   impl ToolInvocation for Panic {
-    fn check_state(&mut self, iteration: usize) -> Result<(), String> { unimplemented!() }
+    fn check_state(&mut self, iteration: usize, _skip_inputs_check: bool) -> Result<(), String> { unimplemented!() }
 
     /// Called until `None` is returned. Put args that override errors before
         /// the the args that can have those errors.
