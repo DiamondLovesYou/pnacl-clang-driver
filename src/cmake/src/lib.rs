@@ -11,9 +11,9 @@ extern crate util;
 #[macro_use]
 extern crate lazy_static;
 
-const PWD: &'static str = env!("PWD");
+const CRATE_ROOT: &'static str = env!("CARGO_MANIFEST_DIR");
 fn get_cmake_modules_dir() -> PathBuf {
-  let pwd = Path::new(PWD);
+  let pwd = Path::new(CRATE_ROOT);
   pwd.join("../../cmake/Modules").to_path_buf()
 }
 
@@ -33,13 +33,15 @@ impl Tool for Invocation {
     use std::process::Command;
     let mut cmd = Command::new("cmake");
 
-    let toolchain_file = get_cmake_modules_dir()
-      .join("Platform/WebAssembly.cmake");
+    let module_dir = get_cmake_modules_dir();
+    let toolchain_file = module_dir.join("Platform/WebAssembly.cmake");
     cmd.arg(format!("-DCMAKE_TOOLCHAIN_FILE={}",
                     toolchain_file.display()));
     cmd.arg(format!("-DCMAKE_CROSSCOMPILING_EMULATOR={}",
                     self.tc.binaryen_tool("wasm-shell").display()));
     cmd.args(self.args.iter());
+    cmd.arg("-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON");
+    cmd.env("WASM_TC_CMAKE_MODULE_PATH", toolchain_file);
 
     queue.enqueue_external(Some("cmake"), cmd,
                            None, false, None);
@@ -67,7 +69,7 @@ impl Tool for Invocation {
 }
 
 impl ToolInvocation for Invocation {
-  fn check_state(&mut self, iteration: usize)
+  fn check_state(&mut self, iteration: usize, _skip_inputs_check: bool)
     -> Result<(), Box<Error>>
   {
     Ok(())

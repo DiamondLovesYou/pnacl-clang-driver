@@ -89,19 +89,6 @@ set(CMAKE_SYSTEM_INFO_FILE Platform/${CMAKE_SYSTEM_NAME})
 
 include(${CMAKE_SYSTEM_INFO_FILE} OPTIONAL RESULT_VARIABLE _INCLUDED_SYSTEM_INFO_FILE)
 
-if(NOT _INCLUDED_SYSTEM_INFO_FILE)
-  message("System is unknown to cmake, create:\n${CMAKE_SYSTEM_INFO_FILE}"
-          " to use this system, please send your config file to "
-          "cmake@www.cmake.org so it can be added to cmake")
-  if(EXISTS ${CMAKE_BINARY_DIR}/CMakeCache.txt)
-    configure_file(${CMAKE_BINARY_DIR}/CMakeCache.txt
-                   ${CMAKE_BINARY_DIR}/CopyOfCMakeCache.txt COPYONLY)
-    message("Your CMakeCache.txt file was copied to CopyOfCMakeCache.txt. "
-            "Please send that file to cmake@www.cmake.org.")
-   endif()
-endif()
-
-
 # optionally include a file which can do extra-generator specific things, e.g.
 # CMakeFindEclipseCDT4.cmake asks gcc for the system include dirs for the Eclipse CDT4 generator
 if(CMAKE_EXTRA_GENERATOR)

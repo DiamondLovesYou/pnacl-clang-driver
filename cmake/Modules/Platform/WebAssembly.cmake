@@ -32,21 +32,17 @@ set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
 
 # In CMake, CMAKE_HOST_WIN32 is set when we are cross-compiling from Win32 to Emscripten: http://www.cmake.org/cmake/help/v2.8.12/cmake.html#variable:CMAKE_HOST_WIN32
 # The variable WIN32 is set only when the target arch that will run the code will be WIN32, so unset WIN32 when cross-compiling.
-set(WIN32)
+unset(WIN32)
 
 # The same logic as above applies for APPLE and CMAKE_HOST_APPLE, so unset APPLE.
-set(APPLE)
+unset(APPLE)
 
 # And for UNIX and CMAKE_HOST_UNIX. However, Emscripten is often able to mimic being a Linux/Unix system, in which case a lot of existing CMakeLists.txt files can be configured for Emscripten while assuming UNIX build, so this is left enabled.
-set(UNIX 1)
+set(UNIX ON)
 
 # Do a no-op access on the CMAKE_TOOLCHAIN_FILE variable so that CMake will not issue a warning on it being unused.
 if (CMAKE_TOOLCHAIN_FILE)
 endif()
-
-# In order for check_function_exists() detection to work, we must signal it to pass an additional flag, which causes the compilation
-# to abort if linking results in any undefined symbols. The CMake detection mechanism depends on the undefined symbol error to be raised.
-set(CMAKE_REQUIRED_FLAGS "-s ERROR_ON_UNDEFINED_SYMBOLS=1")
 
 # Locate where the Emscripten compiler resides in relative to this toolchain file.
 if ("${EMSCRIPTEN_ROOT_PATH}" STREQUAL "")
@@ -69,7 +65,7 @@ endif()
 # Normalize, convert Windows backslashes to forward slashes or CMake will crash.
 get_filename_component(EMSCRIPTEN_ROOT_PATH "${EMSCRIPTEN_ROOT_PATH}" ABSOLUTE)
 
-list(APPEND CMAKE_MODULE_PATH "${EMSCRIPTEN_ROOT_PATH}/cmake/Modules")
+list(APPEND CMAKE_MODULE_PATH "$ENV{WASM_TC_CMAKE_MODULE_PATH}")
 
 list(APPEND CMAKE_FIND_ROOT_PATH "${EMSCRIPTEN_ROOT_PATH}/system")
 
@@ -81,13 +77,19 @@ endif()
 
 # Specify the compilers to use for C and C++
 if ("${CMAKE_C_COMPILER}" STREQUAL "")
-	set(CMAKE_C_COMPILER "wasm-clang${EMCC_SUFFIX}")
+	set(CMAKE_C_COMPILER "wasm-clang" CACHE FILEPATH "C Compiler")
 endif()
 if ("${CMAKE_CXX_COMPILER}" STREQUAL "")
-	set(CMAKE_CXX_COMPILER "wasm-clang++${EMCC_SUFFIX}")
+	set(CMAKE_CXX_COMPILER "wasm-clangxx" CACHE FILEPATH "C++ Compiler")
+endif()
+if ("${CMAKE_ASM_COMPILER}" STREQUAL "")
+    set(CMAKE_ASM_COMPILER "false")
 endif()
 if ("${CMAKE_LINKER}" STREQUAL "")
-    set(CMAKE_LINKER "wasm-ld${EMCC_SUFFIX")
+    set(CMAKE_LINKER "wasm-ld" CACHE FILEPATH "Linker")
+endif()
+if ("${CMAKE_AR}" STREQUAL "")
+    set(CMAKE_AR "$ENV{LLVM_ROOT}/bin/llvm-ar" CACHE FILEPATH "Archiver")
 endif()
 
 # Don't allow CMake to autodetect the compiler, since it does not understand Emscripten.
@@ -95,17 +97,18 @@ endif()
 option(EMSCRIPTEN_FORCE_COMPILERS "Force C/C++ compiler" ON)
 if (EMSCRIPTEN_FORCE_COMPILERS)
 
-	# Detect version of the 'emcc' executable. Note that for CMake, we tell it the version of the Clang compiler and not the version of Emscripten,
+    # Detect version of the 'emcc' executable. Note that for CMake, we tell it the version of the Clang compiler and not the version of Emscripten,
 	# because CMake understands Clang better.
 	if (NOT CMAKE_C_COMPILER_VERSION) # Toolchain script is interpreted multiple times, so don't rerun the check if already done before.
-		execute_process(COMMAND "${CMAKE_C_COMPILER}" "-v" RESULT_VARIABLE _cmake_compiler_result ERROR_VARIABLE _cmake_compiler_output OUTPUT_QUIET)
+		execute_process(COMMAND "${CMAKE_C_COMPILER}" "-v"
+		                RESULT_VARIABLE _cmake_compiler_result
+		                OUTPUT_VARIABLE _cmake_compiler_output
+		                ERROR_VARIABLE _cmake_compiler_output)
 		if (NOT _cmake_compiler_result EQUAL 0)
 			message(FATAL_ERROR "Failed to fetch compiler version information with command \"'${CMAKE_C_COMPILER}' -v\"! Process returned with error code ${_cmake_compiler_result}.")
 		endif()
-		if (NOT "${_cmake_compiler_output}" MATCHES "[Ee]mscripten")
-			message(FATAL_ERROR "System LLVM compiler cannot be used to build with Emscripten! Check Emscripten's LLVM toolchain location in .emscripten configuration file, and make sure to point CMAKE_C_COMPILER to where emcc is located. (was pointing to \"${CMAKE_C_COMPILER}\")")
-		endif()
-		string(REGEX MATCH "clang version ([0-9\.]+)" _dummy_unused "${_cmake_compiler_output}")
+		string(REGEX MATCH "clang version ([0-9\.]+)"
+		       _dummy_unused "${_cmake_compiler_output}")
 		if (NOT CMAKE_MATCH_1)
 			message(FATAL_ERROR "Failed to regex parse Clang compiler version from version string: ${_cmake_compiler_output}")
 		endif()
@@ -129,8 +132,8 @@ if (EMSCRIPTEN_FORCE_COMPILERS)
 	set(CMAKE_CXX_COMPILER_ID Clang)
 	set(CMAKE_CXX_STANDARD_COMPUTED_DEFAULT 98)
 
-	set(CMAKE_C_PLATFORM_ID "emscripten")
-	set(CMAKE_CXX_PLATFORM_ID "emscripten")
+	set(CMAKE_C_PLATFORM_ID "wasm")
+	set(CMAKE_CXX_PLATFORM_ID "wasm")
 
 	if ("${CMAKE_VERSION}" VERSION_LESS "3.8")
 		set(CMAKE_C_COMPILE_FEATURES "c_function_prototypes;c_restrict;c_variadic_macros;c_static_assert")
