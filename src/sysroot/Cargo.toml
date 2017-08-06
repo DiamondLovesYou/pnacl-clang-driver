@@ -1,10 +1,11 @@
 [package]
 authors = ["Richard Diamond <wichard@vitalitystudios.com>"]
-name = "cmake"
+description = "Builds the system libraries for WebAssembly"
+name = "sysroot"
 version = "0.1.0"
 
 [[bin]]
-name = "wasm-cmake"
+name = "wasm-sysroot"
 path = "src/main.rs"
 
 [dependencies]
@@ -12,10 +13,18 @@ lazy_static = "0.2.8"
 regex = "0.2.2"
 tempdir = "0.3.5"
 
+[dependencies.clang-driver]
+optional = false
+path = "../clang/"
+
+[dependencies.ld-driver]
+optional = false
+path = "../ld"
+
 [dependencies.util]
 optional = false
 path = "../util"
 
 [lib]
-name = "cmake_driver"
+name = "sysroot_driver"
 path = "src/lib.rs"

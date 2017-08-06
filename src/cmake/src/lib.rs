@@ -10,6 +10,7 @@ extern crate regex;
 extern crate util;
 #[macro_use]
 extern crate lazy_static;
+extern crate tempdir;
 
 const CRATE_ROOT: &'static str = env!("CARGO_MANIFEST_DIR");
 fn get_cmake_modules_dir() -> PathBuf {
@@ -31,6 +32,8 @@ impl Tool for Invocation {
     -> Result<(), Box<Error>>
   {
     use std::process::Command;
+    use tempdir::TempDir;
+
     let mut cmd = Command::new("cmake");
 
     let module_dir = get_cmake_modules_dir();
@@ -44,7 +47,7 @@ impl Tool for Invocation {
     cmd.env("WASM_TC_CMAKE_MODULE_PATH", toolchain_file);
 
     queue.enqueue_external(Some("cmake"), cmd,
-                           None, false, None);
+                           None, false, None::<Vec<TempDir>>);
 
     Ok(())
   }

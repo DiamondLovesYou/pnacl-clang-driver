@@ -8,6 +8,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
+
+use tempdir::TempDir;
 
 use util::{EhMode, OptimizationGoal, Tool, ToolInvocation,
            CommandQueue, ToolArgs};
@@ -19,6 +22,7 @@ extern crate util;
 #[macro_use]
 extern crate lazy_static;
 extern crate regex;
+extern crate tempdir;
 
 extern crate ld_driver;
 
@@ -37,7 +41,7 @@ fn get_inc_path() -> PathBuf {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-enum DriverMode {
+pub enum DriverMode {
   CC,
   CXX,
 }
@@ -90,38 +94,46 @@ enum FileLang {
   CxxCppOut,
 }
 
+impl FromStr for FileLang {
+  type Err = Box<Error>;
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    let r = match s {
+      "c" => FileLang::C,
+      "i" => FileLang::CppOut,
+      "ii" => FileLang::CxxCppOut,
+
+      "cc" => FileLang::Cxx,
+      "cp" => FileLang::Cxx,
+      "cxx" => FileLang::Cxx,
+      "cpp" => FileLang::Cxx,
+      "CPP" => FileLang::Cxx,
+      "c++" => FileLang::Cxx,
+      "C" => FileLang::Cxx,
+
+      "h" => FileLang::CHeader,
+
+      "hh" => FileLang::CxxHeader,
+      "H" => FileLang::CxxHeader,
+      "hp" => FileLang::CxxHeader,
+      "hxx" => FileLang::CxxHeader,
+      "hpp" => FileLang::CxxHeader,
+      "HPP" => FileLang::CxxHeader,
+      "h++" => FileLang::CxxHeader,
+      "tcc" => FileLang::CxxHeader,
+
+      _ => return Err(From::from("unknown file language")),
+    };
+    Ok(r)
+  }
+}
+
 impl FileLang {
   fn from_path<P: AsRef<Path>>(p: P) -> Option<FileLang> {
     p.as_ref().extension()
       .and_then(|os_str| os_str.to_str() )
       .and_then(|ext| {
-        let r = match ext {
-          "c" => FileLang::C,
-          "i" => FileLang::CppOut,
-          "ii" => FileLang::CxxCppOut,
-
-          "cc" => FileLang::Cxx,
-          "cp" => FileLang::Cxx,
-          "cxx" => FileLang::Cxx,
-          "cpp" => FileLang::Cxx,
-          "CPP" => FileLang::Cxx,
-          "c++" => FileLang::Cxx,
-          "C" => FileLang::Cxx,
-
-          "h" => FileLang::CHeader,
-
-          "hh" => FileLang::CxxHeader,
-          "H" => FileLang::CxxHeader,
-          "hp" => FileLang::CxxHeader,
-          "hxx" => FileLang::CxxHeader,
-          "hpp" => FileLang::CxxHeader,
-          "HPP" => FileLang::CxxHeader,
-          "h++" => FileLang::CxxHeader,
-          "tcc" => FileLang::CxxHeader,
-
-          _ => return None,
-        };
-        Some(r)
+        FromStr::from_str(ext)
+          .ok()
       })
   }
 }
@@ -141,7 +153,7 @@ impl fmt::Display for FileLang {
 #[derive(Debug)]
 pub struct Invocation {
   tc: WasmToolchain,
-  driver_mode: DriverMode,
+  pub driver_mode: DriverMode,
   gcc_mode: Option<GccMode>,
   eh_mode: EhMode,
 
@@ -149,11 +161,12 @@ pub struct Invocation {
 
   no_default_libs: bool,
   no_std_lib: bool,
-  no_default_std_inc: bool,
-  no_default_std_incxx: bool,
+  no_std_inc: bool,
+  no_std_incxx: bool,
 
   shared: bool,
 
+  file_type: Option<FileLang>,
   inputs: Vec<(PathBuf, Option<FileLang>)>,
   header_inputs: Vec<PathBuf>,
 
@@ -189,11 +202,12 @@ impl Invocation {
 
       no_default_libs: false,
       no_std_lib: false,
-      no_default_std_inc: false,
-      no_default_std_incxx: false,
+      no_std_inc: false,
+      no_std_incxx: false,
 
       shared: false,
 
+      file_type: None,
       inputs: Default::default(),
       header_inputs: Default::default(),
 
@@ -260,8 +274,10 @@ BASIC OPTIONS:
   fn get_std_inc_args(&self) -> Vec<String> {
     let mut isystem = Vec::new();
     let system = self.tc.emscripten.join("system/include");
-    if !self.no_default_std_inc {
-      if !self.no_default_std_incxx {
+    if !self.no_std_inc {
+      if !self.no_std_incxx &&
+        self.driver_mode == DriverMode::CXX {
+
         let cxx_inc = system
           .join("libcxx")
           .to_path_buf();
@@ -277,6 +293,7 @@ BASIC OPTIONS:
           .join("include");
         isystem.push(c_inc.to_path_buf());
       }
+      isystem.push(system.to_path_buf());
     }
     isystem
       .into_iter()
@@ -299,6 +316,7 @@ BASIC OPTIONS:
       }
       libs.push(PathBuf::from("-lc"));
       libs.push(PathBuf::from("-ldlmalloc"));
+      libs.push(PathBuf::from("-lcxxabi"));
       libs
     }
   }
@@ -382,10 +400,6 @@ BASIC OPTIONS:
       "-mthread-model", "single",
     ]);
 
-    if self.print_version {
-      return;
-    }
-
     self.optimization.check();
     cmd.arg(format!("{}", self.optimization));
     cmd.args(&[
@@ -394,6 +408,9 @@ BASIC OPTIONS:
       "-Dasm=ASM_FORBIDDEN",
       "-D__asm__=ASM_FORBIDDEN",
     ]);
+    if !self.no_std_incxx && self.driver_mode == DriverMode::CXX {
+      cmd.arg("-D_LIBCPP_ABI_VERSION=2");
+    }
     if !self.is_pch_mode() {
       cmd.arg("-emit-llvm");
       match self.gcc_mode {
@@ -442,7 +459,7 @@ BASIC OPTIONS:
 
       queue.enqueue_external(Some("clang"), cmd,
                              Some("-o"), false,
-                             None);
+                             None::<Vec<TempDir>>);
     } else {
       let header_inputs = self.header_inputs.clone();
       let output = self.output.as_ref();
@@ -461,7 +478,7 @@ BASIC OPTIONS:
 
         queue.enqueue_external(Some("clang"), cmd,
                                out, false,
-                               None);
+                               None::<Vec<TempDir>>);
       }
     }
   }
@@ -475,9 +492,10 @@ BASIC OPTIONS:
     args.extend(inputs);
     args.push("-target".to_string());
     args.push("wasm32-unknown-unknown".to_string());
-    Ok(queue.enqueue_tool(Some("linker"),
-                          ld, args, false,
-                          None)?)
+    queue.enqueue_tool(Some("linker"),
+                       ld, args, false,
+                       None::<Vec<TempDir>>)?;
+    Ok(())
   }
 
   fn add_driver_arg<T: AsRef<str>>(&mut self, arg: T) {
@@ -490,9 +508,11 @@ BASIC OPTIONS:
                                     file_lang: Option<FileLang>) {
     let file = file.as_ref().to_path_buf();
     self.inputs.push((file.clone(), file_lang.clone()));
-    let file_lang = file_lang.or_else(|| {
-      FileLang::from_path(file.clone())
-    });
+    let file_lang = file_lang
+      .or_else(|| { self.file_type })
+      .or_else(|| {
+        FileLang::from_path(file.clone())
+      });
     let is_header_input = match file_lang {
       Some(FileLang::CHeader) | Some(FileLang::CxxHeader) => true,
       _ => false,
@@ -510,7 +530,8 @@ impl Tool for Invocation {
       let mut clang_ver = self.clang_base_cmd();
       self.clang_add_std_args(&mut clang_ver);
       clang_ver.arg("-v");
-      queue.enqueue_external(Some("clang"), clang_ver, None, true, None);
+      queue.enqueue_external(Some("clang"), clang_ver,
+                             None, true, None::<Vec<TempDir>>);
       return Ok(());
     }
 
@@ -568,12 +589,19 @@ impl ToolInvocation for Invocation {
         IGNORED9,
       ]),
       1 => tool_arguments!(Invocation => [
+        NO_DEFAULT_LIBS,
+        NO_STD_INC,
+        NO_STD_INCXX,
+      ]),
+      2 => tool_arguments!(Invocation => [
         TARGET,
         INCLUDE_DIR,
         SYSTEM_INCLUDE,
         SYSROOT_INCLUDE,
         QUOTE_INCLUDE,
         DIR_AFTER_INCLUDE,
+        LINKER_FLAGS0,
+        LINKER_FLAGS1,
         M_FLOAT_ABI,
         F_FLAGS,
         D_FLAGS,
@@ -582,8 +610,6 @@ impl ToolInvocation for Invocation {
         CAP_MF_FLAGS,
         CAP_MT_FLAGS,
         PEDANTIC,
-        LINKER_FLAGS0,
-        LINKER_FLAGS1,
         SHARED,
         SEARCH_PATH,
         LIBRARY,
@@ -592,9 +618,9 @@ impl ToolInvocation for Invocation {
         DEBUG_FLAGS,
         COMPILE, PREPROCESS,
         OUTPUT,
-        UNSUPPORTED,
       ]),
-      2 => tool_arguments!(Invocation => [INPUTS,]),
+      3 => tool_arguments!(Invocation => [X_ARG, INPUTS,]),
+      4 => tool_arguments!(Invocation => [UNSUPPORTED,]),
       _ => None,
     }
   }
@@ -653,6 +679,21 @@ argument!(impl IGNORED8 where { Some(r"^-msse$"), None } for Invocation {
 argument!(impl IGNORED9 where { Some(r"^-pipe$"), None } for Invocation {
     fn ignored9(_this, _single, _cap) {
       // ignore
+    }
+});
+argument!(impl NO_DEFAULT_LIBS where { Some(r"^-nodefaultlibs$"), None } for Invocation {
+    fn no_default_libs_arg(this, _single, _cap) {
+      this.no_default_libs = true;
+    }
+});
+argument!(impl NO_STD_INC where { Some(r"^-nostdinc$"), None } for Invocation {
+    fn no_std_inc_arg(this, _single, _cap) {
+      this.no_std_inc = true;
+    }
+});
+argument!(impl NO_STD_INCXX where { Some(r"^-nostdinc\+\+$"), None } for Invocation {
+    fn no_std_incxx_arg(this, _single, _cap) {
+      this.no_std_incxx = true;
     }
 });
 argument!(impl TARGET where { Some(r"^--?target=(.+)$"), Some(r"^-target$") } for Invocation {
@@ -828,6 +869,18 @@ argument!(impl DEBUG_FLAGS where { Some(r"^-g$"), None } for Invocation {
       let arg = cap.get(0)
         .unwrap().as_str();
       this.add_driver_arg(arg.to_string());
+    }
+});
+argument!(impl X_ARG where { Some(r"^-x(.+)$"), Some(r"^-x$") } for Invocation {
+    fn x_arg(this, single, cap) {
+      let file_type = cap.get(if single { 1 } else { 0 })
+        .unwrap().as_str();
+      if file_type == "none" {
+        this.file_type = None;
+      } else {
+        let ft = FromStr::from_str(file_type)?;
+        this.file_type = Some(ft);
+      }
     }
 });
 tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$") };

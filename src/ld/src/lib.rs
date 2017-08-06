@@ -7,6 +7,7 @@ use util::{Arch, CommandQueue};
 
 pub use util::ldtools::{Input, AllowedTypes};
 use util::toolchain::WasmToolchain;
+use util::OptimizationGoal;
 
 extern crate regex;
 #[macro_use] extern crate util;
@@ -86,6 +87,10 @@ pub struct Invocation {
   pub pic: bool,
   pub allow_nexe_build_id: bool,
   pub static_: bool,
+  pub emit_llvm: bool,
+  pub emit_asm: bool,
+  pub emit_wast: bool,
+  pub emit_wasm: bool,
 
   pub optimize: util::OptimizationGoal,
   pub lto: bool,
@@ -131,6 +136,10 @@ impl Default for Invocation {
       pic: false,
       allow_nexe_build_id: false,
       static_: true,
+      emit_llvm: false,
+      emit_asm: false,
+      emit_wast: false,
+      emit_wasm: true,
 
       optimize: Default::default(),
       lto: false,
@@ -186,6 +195,81 @@ impl Invocation {
     self.output
       .clone()
       .unwrap_or_else(|| From::from("a.out") )
+  }
+
+  pub fn llvm_output_only(&self) -> bool {
+    self.emit_llvm && !self.emit_asm &&
+      !self.emit_wast && !self.emit_wasm
+  }
+  pub fn get_llvm_output(&self) -> Option<PathBuf> {
+    if self.emit_llvm {
+      let mut out = self.get_output();
+      if !self.llvm_output_only() {
+        let name = format!("{}.bc", {
+          out
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+        });
+        out.set_file_name(name);
+      }
+      Some(out)
+    } else {
+      None
+    }
+  }
+  pub fn asm_output_only(&self) -> bool {
+    self.emit_asm && !self.emit_llvm &&
+      !self.emit_wast && !self.emit_wasm
+  }
+  pub fn get_asm_output(&self) -> Option<PathBuf> {
+    if self.emit_asm {
+      let mut out = self.get_output();
+      if !self.asm_output_only() {
+        let name = format!("{}.s", {
+          out
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+        });
+        out.set_file_name(name);
+      }
+      Some(out)
+    } else {
+      None
+    }
+  }
+  pub fn wast_output_only(&self) -> bool {
+    self.emit_wast && !self.emit_llvm &&
+      !self.emit_asm && !self.emit_wasm
+  }
+  pub fn get_wast_output(&self) -> Option<PathBuf> {
+    if self.emit_wast {
+      let mut out = self.get_output();
+      if !self.llvm_output_only() {
+        let name = format!("{}.wast", {
+          out
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+        });
+        out.set_file_name(name);
+      }
+      Some(out)
+    } else {
+      None
+    }
+  }
+
+  pub fn get_llc_optimization_goal(&self) -> util::OptimizationGoal {
+    match self.optimize {
+      OptimizationGoal::Balanced |
+      OptimizationGoal::Size => OptimizationGoal::Speed(2),
+      _ => self.optimize,
+    }
   }
 
   /// Add a non-flag input.
@@ -290,28 +374,35 @@ impl util::ToolInvocation for Invocation {
       0 => {
         tool_arguments!(Invocation => [TARGET, SEARCH_PATH, NO_STDLIB, ])
       },
-      1 => {
-        tool_arguments!(Invocation => [
+      1 => tool_arguments!(Invocation => [
+        EMIT_LLVM_FLAG,
+        EMIT_ASM_FLAG,
+        EMIT_WAST_FLAG,
+      ]),
+      2 => tool_arguments!(Invocation => [
           OUTPUT,
           STATIC,
           RPATH,
           RPATH_LINK,
           SONAME,
+          Z_FLAGS,
           PIC_FLAG,
           OPTIMIZE_FLAG,
           LTO_FLAG,
           STRIP_ALL_FLAG,
           STRIP_DEBUG_FLAG,
           LIBRARY,
+          GC_SECTIONS_FLAG,
           AS_NEEDED_FLAG,
           GROUP_FLAG,
           WHOLE_ARCHIVE_FLAG,
           LINKAGE_FLAG,
           UNDEFINED,
-          UNSUPPORTED, // must be before INPUTS.
-          INPUTS,
-        ])
-      },
+          UNSUPPORTED,
+        ]),
+      3 => tool_arguments!(Invocation => [
+        INPUTS,
+      ]),
       _ => None,
     }
   }
@@ -322,68 +413,104 @@ impl util::Tool for Invocation {
     use std::env::home_dir;
     use std::io::{copy, Write};
     use std::process::Command;
+    use std::rc::Rc;
 
     use tempdir::TempDir;
 
-    if self.has_bitcode_inputs() {
-      /// all inputs will be give in absolute path form.
+    let mut tmpdirs = vec![];
+    let mut link_args = vec![];
+    for input in self.bitcode_inputs.iter() {
+      match input {
+        &Input::Library(_, ref path, _) => {
+          let tmp = TempDir::new("wasm-ld-archive")?;
+          let mut ar = ar::Archive::new(File::open(path)?);
+          while let Some(entry) = ar.next_entry() {
+            let mut entry = entry?;
+            let out = tmp
+              .path()
+              .join(entry.header().identifier())
+              .to_path_buf();
 
-      let mut cmd = Command::new(self.tc.llvm_tool("llvm-link"));
-      let mut tmpdirs = vec![];
-      for input in self.bitcode_inputs.iter() {
-        match input {
-          &Input::Library(_, ref path, _) => {
-            let tmp = TempDir::new("wasm-ld-archive")?;
-            let mut ar = ar::Archive::new(File::open(path)?);
-            while let Some(entry) = ar.next_entry() {
-              let mut entry = entry?;
-              let out = tmp
-                .path()
-                .join(entry.header().identifier())
-                .to_path_buf();
-
-              {
-                let mut out = File::create(out.as_path())?;
-                copy(&mut entry, &mut out)?;
-                out.flush()?;
-              }
-              cmd.arg(out);
+            {
+              let mut out = File::create(out.as_path())?;
+              copy(&mut entry, &mut out)?;
+              out.flush()?;
             }
+            link_args.push(out);
+          }
 
-            tmpdirs.push(tmp);
-          },
-          &Input::File(ref file) => {
-            cmd.arg(file);
-          },
-          &Input::Flag(_) => unreachable!(),
-        }
+          tmpdirs.push(Rc::new(tmp));
+        },
+        &Input::File(ref file) => {
+          link_args.push(file.to_path_buf());
+        },
+        &Input::Flag(_) => unreachable!(),
       }
+    }
 
-      queue.enqueue_external(Some("link"), cmd, Some("-o"), false,
-                             Some(tmpdirs));
+    while self.has_bitcode_inputs() {
+      /// all inputs will be give in absolute path form.
+      let mut cmd = Command::new(self.tc.llvm_tool("llvm-link"));
+      cmd.args(link_args.clone());
+
+      {
+        let mut cmd = queue.enqueue_external(Some("link"), cmd,
+                                             Some("-o"), false,
+                                             Some(tmpdirs.clone()));
+        cmd.copy_output_to = self.get_llvm_output();
+      }
+      if !self.emit_asm && !self.emit_wast && !self.emit_wasm {
+        break;
+      }
 
       let mut cmd = Command::new(self.tc.llvm_tool("llc"));
       cmd.arg(format!("-march={}", self.get_arch().llvm_arch().unwrap()))
         .arg("-filetype=asm")
         .arg("-asm-verbose=true")
         .arg("-thread-model=single")
-        .arg("-combiner-global-alias-analysis=false");
+        .arg("-combiner-global-alias-analysis=false")
+        .arg(format!("{}", self.get_llc_optimization_goal()));
 
-      queue.enqueue_external(Some("llc"), cmd, Some("-o"), false,
-                             None);
+      {
+        let mut cmd = queue.enqueue_external(Some("llc"), cmd,
+                                             Some("-o"), false,
+                                             None::<Vec<TempDir>>);
+        cmd.copy_output_to = self.get_asm_output();
+      }
+      if !self.emit_wast && !self.emit_wasm {
+        break;
+      }
 
       let emscripten_cache = home_dir().unwrap()
         .join(".emscripten_cache/wasm");
       let mut cmd = Command::new(self.tc.binaryen_tool("s2wasm"));
-      cmd.arg("--binary")
-        .arg("--dylink")
-        .arg("-l")
-        .arg(emscripten_cache.join("wasm_compiler_rt.a"))
-        .arg("-l")
-        .arg(emscripten_cache.join("wasm_libc_rt.a"));
+      cmd.arg("--dylink");
 
-      queue.enqueue_external(Some("s2wasm"), cmd, Some("-o"), false,
-                             None);
+      if !self.emit_wast {
+        cmd.arg("--binary");
+      }
+
+      let out_arg = if self.emit_wast && self.emit_wasm {
+        cmd.arg("-o");
+        cmd.arg(self.get_wast_output().unwrap());
+        None
+      } else {
+        Some("-o")
+      };
+
+      queue.enqueue_external(Some("s2wasm"), cmd,
+                             out_arg, false,
+                             None::<Vec<TempDir>>);
+
+      if self.emit_wast && self.emit_wasm {
+        self.emit_llvm = false;
+        self.emit_asm = false;
+        self.emit_wast = false;
+        continue; // XXX This is purely because the queue
+        // always drains the prev outputs array.
+      } else {
+        break;
+      }
     }
 
     assert!(!self.has_native_inputs());
@@ -401,6 +528,25 @@ impl util::Tool for Invocation {
   fn override_output(&mut self, out: PathBuf) { self.output = Some(out); }
 }
 
+
+argument!(impl EMIT_LLVM_FLAG where { Some(r"^--emit-llvm$"), None } for Invocation {
+    fn emit_llvm_flag(this, _single, _cap) {
+      this.emit_llvm = true;
+    }
+});
+
+argument!(impl EMIT_ASM_FLAG where { Some(r"^--emit-S$"), None } for Invocation {
+    fn emit_asm_flag(this, _single, _cap) {
+      this.emit_asm = true;
+    }
+});
+
+argument!(impl EMIT_WAST_FLAG where { Some(r"^--emit-wast$"), None } for Invocation {
+    fn emit_wast_flag(this, _single, _cap) {
+      this.emit_wast = true;
+    }
+});
+
 tool_argument!(TARGET: Invocation = { Some(r"^--?target=(.+)$"), Some(r"^--?target$") };
                fn set_target(this, single, cap) {
                    if this.arch.is_some() {
@@ -412,7 +558,7 @@ tool_argument!(TARGET: Invocation = { Some(r"^--?target=(.+)$"), Some(r"^--?targ
                    this.arch = Some(arch);
                    Ok(())
                });
-tool_argument!(OUTPUT: Invocation = { Some(r"-o(.+)"), Some(r"^-(o|-output)$") };
+tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$") };
                fn set_output(this, single, cap) {
                    if this.output.is_some() {
                        Err("more than one output specified")?;
@@ -588,6 +734,17 @@ fn passthrough_bc_link_flags4<'str>(this: &mut Invocation,
   Ok(())
 }*/
 
+argument!(impl Z_FLAGS where { None, Some(r"^-z$") } for Invocation {
+    fn z_flags(_this, _single, _cap) {
+      // TODO
+    }
+});
+
+argument!(impl GC_SECTIONS_FLAG where { Some(r"^--(no-)?gc-sections$"), None } for Invocation {
+    fn gc_sections_arg(_this, _single, _cap) {
+    }
+});
+
 tool_argument!(PIC_FLAG: Invocation = { Some(r"^-fPIC$"), None };
                fn set_pic(this, _single, _cap) {
                    this.pic = true;
@@ -596,7 +753,7 @@ tool_argument!(PIC_FLAG: Invocation = { Some(r"^-fPIC$"), None };
 
 tool_argument!(OPTIMIZE_FLAG: Invocation = { Some(r"^-O([0-4sz]?)$"), None };
                fn set_optimize(this, _single, cap) {
-                   this.optimize = cap.get(0)
+                   this.optimize = cap.get(1)
                        .and_then(|str| util::OptimizationGoal::parse(str.as_str()) )
                        .unwrap();
                    Ok(())

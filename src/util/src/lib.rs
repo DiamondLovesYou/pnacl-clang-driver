@@ -9,6 +9,7 @@ use std::io::{Write};
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::rc::Rc;
 
 use tempdir::TempDir;
 
@@ -123,6 +124,14 @@ pub fn expect_next<'a, T>(args: &mut T) -> <T as Iterator>::Item
     if arg.is_none() { panic!("expected another argument"); }
     arg.unwrap()
 }
+
+pub fn get_crate_root() -> PathBuf {
+  const CRATE_ROOT: &'static str = env!("CARGO_MANIFEST_DIR");
+  let pwd = Path::new(CRATE_ROOT)
+    .join("../..");
+  pwd.to_path_buf()
+}
+
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum ArchSubtype {
     Linux,
@@ -439,7 +448,11 @@ pub struct Command {
   pub cmd: CommandKind,
   /// should we print the command we just tried to run if it exits with a non-zero status?
   pub cant_fail: bool,
-  pub tmp_dirs: Vec<TempDir>,
+  pub tmp_dirs: Vec<Rc<TempDir>>,
+  pub intermediate_name: Option<PathBuf>,
+  pub prev_outputs: bool,
+  pub output_override: bool,
+  pub copy_output_to: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -459,11 +472,11 @@ impl From<std::io::Error> for CommandQueueError {
 }
 
 pub struct CommandQueue {
-    pub final_output: Option<PathBuf>,
+  pub final_output: Option<PathBuf>,
 
-    queue: Vec<Command>,
-    verbose: bool,
-    dry_run: bool,
+  queue: Vec<Command>,
+  verbose: bool,
+  dry_run: bool,
 }
 
 impl CommandQueue {
@@ -483,11 +496,14 @@ impl CommandQueue {
     self.dry_run = v;
   }
 
-  pub fn enqueue_external(&mut self, name: Option<&'static str>,
-                          mut cmd: process::Command,
-                          output_arg: Option<&'static str>,
-                          cant_fail: bool,
-                          tmp_dirs: Option<Vec<TempDir>>) {
+  pub fn enqueue_external<U>(&mut self, name: Option<&'static str>,
+                             mut cmd: process::Command,
+                             output_arg: Option<&'static str>,
+                             cant_fail: bool,
+                             tmp_dirs: Option<Vec<U>>)
+    -> &mut Command
+    where U: Into<Rc<TempDir>>,
+  {
     use std::process::{Stdio};
 
     cmd.stdout(Stdio::inherit())
@@ -499,18 +515,31 @@ impl CommandQueue {
       name: name.map(|v| v.to_string() ),
       cmd: kind,
       cant_fail: cant_fail,
-      tmp_dirs: tmp_dirs.unwrap_or_default(),
+      tmp_dirs: tmp_dirs
+        .map(|dirs| {
+          dirs.into_iter()
+            .map(|dir| dir.into() )
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default(),
+      intermediate_name: None,
+      prev_outputs: true,
+      output_override: true,
+      copy_output_to: None,
     };
 
     self.queue.push(command);
+    self.queue.last_mut().unwrap()
   }
 
-  pub fn enqueue_tool<T: ToolInvocation + 'static>(&mut self,
-                                                   name: Option<&'static str>,
-                                                   mut invocation: T, args: Vec<String>,
-                                                   cant_fail: bool,
-                                                   tmp_dirs: Option<Vec<TempDir>>)
-    -> Result<(), Box<Error>>
+  pub fn enqueue_tool<T, U>(&mut self,
+                            name: Option<&'static str>,
+                            mut invocation: T, args: Vec<String>,
+                            cant_fail: bool,
+                            tmp_dirs: Option<Vec<U>>)
+    -> Result<&mut Command, Box<Error>>
+    where T: ToolInvocation + 'static,
+          U: Into<Rc<TempDir>>,
   {
     process_invocation_args(&mut invocation, args, true)?;
 
@@ -519,15 +548,26 @@ impl CommandQueue {
       name: name.map(|v| v.to_string() ),
       cmd: kind,
       cant_fail: cant_fail,
-      tmp_dirs: tmp_dirs.unwrap_or_default(),
+      tmp_dirs: tmp_dirs
+        .map(|dirs| {
+          dirs.into_iter()
+            .map(|dir| dir.into() )
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default(),
+      intermediate_name: None,
+      prev_outputs: true,
+      output_override: true,
+      copy_output_to: None,
     };
 
     self.queue.push(command);
 
-    Ok(())
+    Ok(self.queue.last_mut().unwrap())
   }
 
   pub fn run_all(&mut self) -> Result<(), CommandQueueError> {
+    use std::fs::copy;
     let cmd_len = self.queue.len();
     let iter = self.queue.drain(..)
       .enumerate()
@@ -536,13 +576,17 @@ impl CommandQueue {
       });
 
     let intermediate = TempDir::new("wasm-driver-cmd-queue-intermediates")?;
-    let mut prev_output = None;
+    let mut prev_output = Vec::new();
     for (is_last, idx, mut cmd) in iter {
       println!("on command: {:?}", cmd.name);
       println!("full cmd: {:?}", cmd.cmd);
 
-      let out = if is_last && self.final_output.is_some() {
+      let mut out = if is_last && self.final_output.is_some() {
         self.final_output.as_ref().unwrap().to_path_buf()
+      } else if let Some(ref name) = cmd.intermediate_name {
+        intermediate.path()
+          .join(name)
+          .to_path_buf()
       } else {
         intermediate.path()
           .join(format!("{}", idx))
@@ -551,25 +595,23 @@ impl CommandQueue {
 
       println!("output: {}", out.display());
 
-      // touch the output file:
-      if false {
-        let _file = std::fs::File::create(out.as_path()).unwrap();
-      }
-
       let cant_fail = cmd.cant_fail;
 
       match cmd.cmd {
-        CommandKind::External(ref mut cmd, Some(out_arg)) => {
-          if let Some(prev) = prev_output.take() {
-            cmd.arg(prev);
+        CommandKind::External(ref mut sys_cmd, Some(out_arg)) => {
+          if cmd.prev_outputs {
+            for prev in prev_output.drain(..) {
+              sys_cmd.arg(prev);
+            }
           }
 
-          prev_output = Some(out.to_path_buf());
+          if cmd.output_override {
+            prev_output.push(out.to_path_buf());
+            sys_cmd.arg(out_arg);
+            sys_cmd.arg(out.as_path());
+          }
 
-          cmd.arg(out_arg);
-          cmd.arg(out);
-
-          let mut child = cmd.spawn()?;
+          let mut child = sys_cmd.spawn()?;
           let result = child.wait()?;
 
           if cant_fail {
@@ -581,12 +623,14 @@ impl CommandQueue {
             return Err(CommandQueueError::ProcessError(result.code()));
           }
         },
-        CommandKind::External(ref mut cmd, None) if !is_last || self.final_output.is_none() => {
-          if let Some(prev) = prev_output.take() {
-            cmd.arg(prev);
+        CommandKind::External(ref mut sys_cmd, None) if !is_last || self.final_output.is_none() => {
+          if cmd.prev_outputs {
+            for prev in prev_output.drain(..) {
+              sys_cmd.arg(prev);
+            }
           }
 
-          let mut child = cmd.spawn()?;
+          let mut child = sys_cmd.spawn()?;
           let result = child.wait()?;
 
           if cant_fail {
@@ -602,22 +646,51 @@ impl CommandQueue {
           panic!("internal error: last command in queue doesn't have a output param");
         },
         CommandKind::Tool(ref mut tool) => {
-          if let Some(prev) = prev_output.take() {
-            tool.add_tool_input(prev)?;
+          if cmd.prev_outputs {
+            for prev in prev_output.drain(..) {
+              tool.add_tool_input(prev)?;
+            }
           }
 
-          tool.override_output(out.to_path_buf());
-          let mut queue = CommandQueue::new(Some(out.to_path_buf()));
-          prev_output = Some(out);
+          let mut queue = if cmd.output_override {
+            tool.override_output(out.to_path_buf());
+            prev_output.push(out.to_path_buf());
+            CommandQueue::new(Some(out.to_path_buf()))
+          } else {
+            let o = tool.get_output()
+              .map(|v| v.to_path_buf() );
+            if let Some(o) = o.as_ref() {
+              out = o.to_path_buf();
+            }
+            CommandQueue::new(o)
+          };
 
           tool.enqueue_commands(&mut queue)?;
           queue.run_all()?;
         },
         _ => { unreachable!(); }
       }
+
+      if let Some(copy_to) = cmd.copy_output_to.as_ref() {
+        copy(out, copy_to)?;
+      }
+    }
+
+    if boolean_env("WASM_TOOLCHAIN_SAVE_TMPS") {
+      let tmp = intermediate.into_path();
+      println!("Saving tmps in `{}`.", tmp.display());
     }
 
     Ok(())
+  }
+}
+
+pub fn boolean_env<K>(k: K) -> bool
+  where K: AsRef<std::ffi::OsStr>,
+{
+  match std::env::var(k) {
+    Ok(ref v) if v != "0" => true,
+    _ => false,
   }
 }
 
