@@ -92,6 +92,8 @@ pub struct Invocation {
   pub emit_wast: bool,
   pub emit_wasm: bool,
 
+  pub s2wasm_libname: Option<String>,
+
   pub optimize: util::OptimizationGoal,
   pub lto: bool,
   pub strip: util::StripMode,
@@ -140,6 +142,8 @@ impl Default for Invocation {
       emit_asm: false,
       emit_wast: false,
       emit_wasm: true,
+
+      s2wasm_libname: None,
 
       optimize: Default::default(),
       lto: false,
@@ -484,7 +488,11 @@ impl util::Tool for Invocation {
       let emscripten_cache = home_dir().unwrap()
         .join(".emscripten_cache/wasm");
       let mut cmd = Command::new(self.tc.binaryen_tool("s2wasm"));
-      cmd.arg("--dylink");
+      if let Some(ref libname) = self.s2wasm_libname {
+        cmd.arg(format!("--dylink-libname={}", libname));
+      } else {
+        cmd.arg("--dylink");
+      }
 
       if !self.emit_wast {
         cmd.arg("--binary");

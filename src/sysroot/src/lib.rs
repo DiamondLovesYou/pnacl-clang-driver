@@ -177,6 +177,8 @@ pub fn link(invoc: &Invocation, queue: &mut CommandQueue,
   linker.emit_wast = invoc.emit_wast;
   linker.emit_wasm = invoc.emit_wasm;
   linker.optimize = util::OptimizationGoal::Size;
+  let libname = out_name[..out_name.len() - 3].to_string();
+  linker.s2wasm_libname = Some(libname);
 
   let mut cmd = queue
     .enqueue_tool(Some("link"),
