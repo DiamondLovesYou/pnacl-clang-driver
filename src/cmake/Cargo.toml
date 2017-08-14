@@ -1,6 +1,6 @@
 [package]
 authors = ["Richard Diamond <wichard@vitalitystudios.com>"]
-name = "cmake"
+name = "cmake-driver"
 version = "0.1.0"
 
 [[bin]]
