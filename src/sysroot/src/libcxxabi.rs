@@ -3,7 +3,6 @@ use util::{CommandQueue};
 
 use tempdir::TempDir;
 use clang_driver;
-use ld_driver;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};

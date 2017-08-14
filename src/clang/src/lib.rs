@@ -150,12 +150,46 @@ impl fmt::Display for FileLang {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum MakeDepOutput {
+  Exact(PathBuf),
+  ExactQuote(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct MakeDeps {
+  enabled: bool,
+  system_headers: bool,
+  phony_targets: bool,
+  implied_cap_e: bool,
+  allow_missing_headers: bool,
+
+  output: Option<MakeDepOutput>,
+  dest: Option<PathBuf>,
+}
+impl Default for MakeDeps {
+  fn default() -> Self {
+    MakeDeps {
+      enabled: false,
+      system_headers: false,
+      phony_targets: false,
+      implied_cap_e: false,
+      allow_missing_headers: false,
+
+      output: None,
+      dest: None,
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
 pub struct Invocation {
   tc: WasmToolchain,
   pub driver_mode: DriverMode,
   gcc_mode: Option<GccMode>,
   eh_mode: EhMode,
+
+  pub make_deps: MakeDeps,
 
   optimization: OptimizationGoal,
 
@@ -163,6 +197,7 @@ pub struct Invocation {
   no_std_lib: bool,
   no_std_inc: bool,
   no_std_incxx: bool,
+  pic: bool,
 
   shared: bool,
 
@@ -176,7 +211,6 @@ pub struct Invocation {
   output: Option<PathBuf>,
 
   verbose: bool,
-  run_queue: Vec<Command>,
 
   print_version: bool,
 }
@@ -198,12 +232,16 @@ impl Invocation {
       gcc_mode: Default::default(),
       eh_mode: Default::default(),
 
+      make_deps: Default::default(),
+
       optimization: Default::default(),
 
       no_default_libs: false,
       no_std_lib: false,
       no_std_inc: false,
       no_std_incxx: false,
+
+      pic: false,
 
       shared: false,
 
@@ -217,7 +255,6 @@ impl Invocation {
       output: Default::default(),
 
       verbose: false,
-      run_queue: Default::default(),
       print_version: false,
     }
   }
@@ -424,6 +461,68 @@ BASIC OPTIONS:
       }
     }
 
+    if self.pic {
+      cmd.arg("-fPIC");
+    }
+
+    match self.make_deps {
+      MakeDeps {
+        enabled: true,
+        system_headers: true,
+        implied_cap_e: true,
+        ..
+      } => {
+        cmd.arg("-M");
+      },
+      MakeDeps {
+        enabled: true,
+        system_headers: false,
+        implied_cap_e: true,
+        ..
+      } => {
+        cmd.arg("-MM");
+      },
+      _ => {},
+    }
+    match self.make_deps {
+      MakeDeps {
+        enabled: true,
+        implied_cap_e: false,
+        system_headers: true,
+        ..
+      } => {
+        cmd.arg("-MD");
+      },
+      MakeDeps {
+        enabled: true,
+        implied_cap_e: false,
+        system_headers: false,
+        ..
+      } => {
+        cmd.arg("-MMD");
+      },
+      _ => {},
+    }
+    if self.make_deps.phony_targets {
+      cmd.arg("-MP");
+    }
+    if self.make_deps.allow_missing_headers {
+      cmd.arg("-MG");
+    }
+
+    match self.make_deps.output {
+      Some(MakeDepOutput::Exact(ref out)) => {
+        cmd.arg("-MT").arg(out);
+      },
+      Some(MakeDepOutput::ExactQuote(ref out)) => {
+        cmd.arg("-MQ").arg(out);
+      },
+      None => {},
+    }
+    if let Some(ref dest) = self.make_deps.dest {
+      cmd.arg("-MF").arg(dest);
+    }
+
     cmd.args(&self.get_std_inc_args()[..]);
     cmd.args(&self.driver_args[..]);
   }
@@ -576,7 +675,6 @@ impl ToolInvocation for Invocation {
     match iteration {
       0 => tool_arguments!(Invocation => [
         VERSION,
-        F_POSITION_INDEPENDENT_CODE,
         IGNORED0,
         IGNORED1,
         IGNORED2,
@@ -594,6 +692,15 @@ impl ToolInvocation for Invocation {
         NO_STD_INCXX,
       ]),
       2 => tool_arguments!(Invocation => [
+        CAP_M_FLAGS,
+        CAP_MM_FLAGS,
+        CAP_MP_FLAGS,
+        CAP_MD_FLAGS,
+        CAP_MF_FLAGS,
+        CAP_MT_FLAGS,
+        CAP_MQ_FLAGS,
+      ]),
+      3 => tool_arguments!(Invocation => [
         TARGET,
         INCLUDE_DIR,
         SYSTEM_INCLUDE,
@@ -603,12 +710,11 @@ impl ToolInvocation for Invocation {
         LINKER_FLAGS0,
         LINKER_FLAGS1,
         M_FLOAT_ABI,
+
+        F_POSITION_INDEPENDENT_CODE,
         F_FLAGS,
         D_FLAGS,
         W_FLAGS,
-        CAP_M_FLAGS,
-        CAP_MF_FLAGS,
-        CAP_MT_FLAGS,
         PEDANTIC,
         SHARED,
         SEARCH_PATH,
@@ -619,16 +725,16 @@ impl ToolInvocation for Invocation {
         COMPILE, PREPROCESS,
         OUTPUT,
       ]),
-      3 => tool_arguments!(Invocation => [X_ARG, INPUTS,]),
-      4 => tool_arguments!(Invocation => [UNSUPPORTED,]),
+      4 => tool_arguments!(Invocation => [X_ARG, INPUTS,]),
+      5 => tool_arguments!(Invocation => [UNSUPPORTED,]),
       _ => None,
     }
   }
 }
 
 argument!(impl F_POSITION_INDEPENDENT_CODE where { Some(r"^-fPIC$"), None } for Invocation {
-    fn f_pos_indep_code(_this, _single, _cap) {
-        // ignore
+    fn f_pos_indep_code(this, _single, _cap) {
+        this.pic = true;
     }
 });
 argument!(impl IGNORED0 where { Some(r"^-Qy$"), None } for Invocation {
@@ -786,27 +892,66 @@ argument!(impl W_FLAGS where { Some(r"^-W(.*)$"), None } for Invocation {
       this.add_driver_arg(arg.to_string());
     }
 });
-argument!(impl CAP_M_FLAGS where { Some(r"^-M([^FTQ]?|MD)$"), None } for Invocation {
-    fn cap_m_args(this, _single, cap) {
-      let arg = cap.get(0)
-        .unwrap().as_str();
-      this.add_driver_arg(arg.to_string());
+argument!(impl CAP_M_FLAGS where { Some(r"^-M$"), None } for Invocation {
+    fn cap_m_args(this, _single, _cap) {
+      let mut md = &mut this.make_deps;
+      md.enabled = true;
+    }
+});
+argument!(impl CAP_MM_FLAGS where { Some(r"^-MM$"), None } for Invocation {
+    fn cap_mm_args(this, _single, _cap) {
+      let mut md = &mut this.make_deps;
+      md.enabled = true;
+      md.system_headers = false;
+    }
+});
+argument!(impl CAP_MG_FLAGS where { Some(r"^-MG$"), None } for Invocation {
+    fn cap_mg_args(this, _single, _cap) {
+      let mut md = &mut this.make_deps;
+      md.allow_missing_headers = true;
+    }
+});
+argument!(impl CAP_MP_FLAGS where { Some(r"^-MP$"), None } for Invocation {
+    fn cap_mp_args(this, _single, _cap) {
+      let mut md = &mut this.make_deps;
+      md.phony_targets = true;
+    }
+});
+argument!(impl CAP_MD_FLAGS where { Some(r"^-M(M)?D$"), None } for Invocation {
+    fn cap_md_args(this, _single, cap) {
+      let mut md = &mut this.make_deps;
+      md.enabled = true;
+      md.implied_cap_e = false;
+      md.system_headers = cap.get(1).is_none();
     }
 });
 argument!(impl CAP_MF_FLAGS where { None, Some(r"^-MF$") } for Invocation {
     fn cap_mf_args(this, _single, cap) {
-      let arg = cap.get(0)
-        .unwrap().as_str();
-      this.add_driver_arg("-MF");
-      this.add_driver_arg(arg);
+      let file = cap.get(0).unwrap().as_str();
+      let file = Path::new(file).to_path_buf();
+
+      let mut md = &mut this.make_deps;
+      md.dest = Some(file);
     }
 });
 argument!(impl CAP_MT_FLAGS where { None, Some(r"^-MT$") } for Invocation {
     fn cap_mt_args(this, _single, cap) {
-      let arg = cap.get(0)
-        .unwrap().as_str();
-      this.add_driver_arg("-MT");
-      this.add_driver_arg(arg);
+      let file = cap.get(0).unwrap().as_str();
+      let file = Path::new(file).to_path_buf();
+      let file = MakeDepOutput::Exact(file);
+
+      let mut md = &mut this.make_deps;
+      md.output = Some(file);
+    }
+});
+argument!(impl CAP_MQ_FLAGS where { None, Some(r"^-MQ$") } for Invocation {
+    fn cap_mq_args(this, _single, cap) {
+      let file = cap.get(0).unwrap().as_str();
+      let file = Path::new(file).to_path_buf();
+      let file = MakeDepOutput::ExactQuote(file);
+
+      let mut md = &mut this.make_deps;
+      md.output = Some(file);
     }
 });
 argument!(impl PEDANTIC where { Some(r"^-(no-)?pedantic$"), None } for Invocation {

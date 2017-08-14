@@ -18,13 +18,24 @@ fn get_cmake_modules_dir() -> PathBuf {
   pwd.join("../../cmake/Modules").to_path_buf()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Invocation {
   tc: WasmToolchain,
   args: Vec<String>,
+  pub output_dir: PathBuf,
 }
 
 impl Invocation {
+}
+impl Default for Invocation {
+  fn default() -> Self {
+    Invocation {
+      tc: Default::default(),
+      args: vec![],
+      output_dir: std::env::current_dir()
+        .expect("current_dir failed?"),
+    }
+  }
 }
 
 impl Tool for Invocation {
@@ -35,6 +46,7 @@ impl Tool for Invocation {
     use tempdir::TempDir;
 
     let mut cmd = Command::new("cmake");
+    cmd.current_dir(self.output_dir.as_path());
 
     let module_dir = get_cmake_modules_dir();
     let toolchain_file = module_dir.join("Platform/WebAssembly.cmake");

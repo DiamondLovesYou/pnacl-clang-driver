@@ -2,7 +2,6 @@ use super::{Invocation, link};
 use util::CommandQueue;
 
 use clang_driver;
-use ld_driver;
 
 use std::collections::HashSet;
 use std::error::Error;

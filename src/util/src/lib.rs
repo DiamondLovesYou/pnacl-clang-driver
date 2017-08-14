@@ -435,9 +435,9 @@ fn eh_mode_test() {
 #[derive(Debug)]
 pub enum CommandKind {
   /// if Some(..), its value will be the argument used. The output will be
-    /// written to a random temp folder && added to the next command's
-    /// arguments.
-    /// ie Some("-o")
+  /// written to a random temp folder && added to the next command's
+  /// arguments.
+  /// ie Some("-o")
   External(process::Command, Option<&'static str>),
   Tool(Box<Tool>),
 }

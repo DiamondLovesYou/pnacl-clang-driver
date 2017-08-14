@@ -86,7 +86,11 @@ pub struct Invocation {
   pub use_defaultlibs: bool,
   pub pic: bool,
   pub allow_nexe_build_id: bool,
-  pub static_: bool,
+
+  static_input: bool,
+
+  // build a shared object
+  pub shared: bool,
   pub emit_llvm: bool,
   pub emit_asm: bool,
   pub emit_wast: bool,
@@ -115,7 +119,7 @@ pub struct Invocation {
 
   pub soname: Option<String>,
 
-  ld_flags: Vec<String>,
+  pub ld_flags: Vec<String>,
   ld_flags_native: Vec<String>,
 
   trans_flags: Vec<String>,
@@ -137,7 +141,10 @@ impl Default for Invocation {
       use_defaultlibs: true,
       pic: false,
       allow_nexe_build_id: false,
-      static_: true,
+
+      static_input: false,
+
+      shared: false,
       emit_llvm: false,
       emit_asm: false,
       emit_wast: false,
@@ -582,9 +589,9 @@ tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$")
 tool_argument!(STATIC: Invocation = { Some(r"-static"), None };
                fn set_static(this, _single, _cap) {
                    if !this.relocatable {
-                       this.static_ = true;
+                       this.static_input = true;
                    } else {
-                       this.static_ = false;
+                       this.static_input = false;
                    }
                    Ok(())
                });
