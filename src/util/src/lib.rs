@@ -1,17 +1,18 @@
 #![feature(trace_macros)]
 #![feature(box_syntax)]
 #![feature(macro_reexport)]
+#![feature(fnbox)]
 #![cfg_attr(test, feature(set_stdio))]
 
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self};
 use std::io::{Write};
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::rc::Rc;
 
-use tempdir::TempDir;
+pub use command_queue::{CommandQueueError, CommandQueue,
+                        Command};
 
 extern crate regex;
 extern crate elf;
@@ -26,6 +27,7 @@ extern crate maplit;
 pub mod filetype;
 pub mod ldtools;
 pub mod toolchain;
+pub mod command_queue;
 
 #[cfg(feature = "nacl")]
 pub const SDK_VERSION: &'static str = include_str!(concat!(env!("OUT_DIR"),
@@ -432,259 +434,6 @@ fn eh_mode_test() {
              Some(Ok(EhMode::Zerocost)));
 }
 
-#[derive(Debug)]
-pub enum CommandKind {
-  /// if Some(..), its value will be the argument used. The output will be
-  /// written to a random temp folder && added to the next command's
-  /// arguments.
-  /// ie Some("-o")
-  External(process::Command, Option<&'static str>),
-  Tool(Box<Tool>),
-}
-
-#[derive(Debug)]
-pub struct Command {
-  pub name: Option<String>,
-  pub cmd: CommandKind,
-  /// should we print the command we just tried to run if it exits with a non-zero status?
-  pub cant_fail: bool,
-  pub tmp_dirs: Vec<Rc<TempDir>>,
-  pub intermediate_name: Option<PathBuf>,
-  pub prev_outputs: bool,
-  pub output_override: bool,
-  pub copy_output_to: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-pub enum CommandQueueError {
-  Error(Box<Error>),
-  ProcessError(Option<i32>),
-}
-impl From<Box<Error>> for CommandQueueError {
-  fn from(v: Box<Error>) -> CommandQueueError {
-    CommandQueueError::Error(v)
-  }
-}
-impl From<std::io::Error> for CommandQueueError {
-  fn from(v: std::io::Error) -> Self {
-    CommandQueueError::Error(From::from(v))
-  }
-}
-
-pub struct CommandQueue {
-  pub final_output: Option<PathBuf>,
-
-  queue: Vec<Command>,
-  verbose: bool,
-  dry_run: bool,
-}
-
-impl CommandQueue {
-  pub fn new(final_output: Option<PathBuf>) -> CommandQueue {
-    CommandQueue {
-      final_output: final_output,
-
-      queue: Default::default(),
-      verbose: false,
-      dry_run: false,
-    }
-  }
-  pub fn set_verbose(&mut self, v: bool) {
-    self.verbose = v;
-  }
-  pub fn set_dry_run(&mut self, v: bool) {
-    self.dry_run = v;
-  }
-
-  pub fn enqueue_external<U>(&mut self, name: Option<&'static str>,
-                             mut cmd: process::Command,
-                             output_arg: Option<&'static str>,
-                             cant_fail: bool,
-                             tmp_dirs: Option<Vec<U>>)
-    -> &mut Command
-    where U: Into<Rc<TempDir>>,
-  {
-    use std::process::{Stdio};
-
-    cmd.stdout(Stdio::inherit())
-      .stderr(Stdio::inherit())
-      .stdin(Stdio::inherit());
-
-    let kind = CommandKind::External(cmd, output_arg);
-    let command = Command {
-      name: name.map(|v| v.to_string() ),
-      cmd: kind,
-      cant_fail: cant_fail,
-      tmp_dirs: tmp_dirs
-        .map(|dirs| {
-          dirs.into_iter()
-            .map(|dir| dir.into() )
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default(),
-      intermediate_name: None,
-      prev_outputs: true,
-      output_override: true,
-      copy_output_to: None,
-    };
-
-    self.queue.push(command);
-    self.queue.last_mut().unwrap()
-  }
-
-  pub fn enqueue_tool<T, U>(&mut self,
-                            name: Option<&'static str>,
-                            mut invocation: T, args: Vec<String>,
-                            cant_fail: bool,
-                            tmp_dirs: Option<Vec<U>>)
-    -> Result<&mut Command, Box<Error>>
-    where T: ToolInvocation + 'static,
-          U: Into<Rc<TempDir>>,
-  {
-    process_invocation_args(&mut invocation, args, true)?;
-
-    let kind = CommandKind::Tool(box invocation as Box<Tool>);
-    let command = Command {
-      name: name.map(|v| v.to_string() ),
-      cmd: kind,
-      cant_fail: cant_fail,
-      tmp_dirs: tmp_dirs
-        .map(|dirs| {
-          dirs.into_iter()
-            .map(|dir| dir.into() )
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default(),
-      intermediate_name: None,
-      prev_outputs: true,
-      output_override: true,
-      copy_output_to: None,
-    };
-
-    self.queue.push(command);
-
-    Ok(self.queue.last_mut().unwrap())
-  }
-
-  pub fn run_all(&mut self) -> Result<(), CommandQueueError> {
-    use std::fs::copy;
-    let cmd_len = self.queue.len();
-    let iter = self.queue.drain(..)
-      .enumerate()
-      .map(|(idx, v)| {
-        (idx == cmd_len - 1, idx, v)
-      });
-
-    let intermediate = TempDir::new("wasm-driver-cmd-queue-intermediates")?;
-    let mut prev_output = Vec::new();
-    for (is_last, idx, mut cmd) in iter {
-      println!("on command: {:?}", cmd.name);
-      println!("full cmd: {:?}", cmd.cmd);
-
-      let mut out = if is_last && self.final_output.is_some() {
-        self.final_output.as_ref().unwrap().to_path_buf()
-      } else if let Some(ref name) = cmd.intermediate_name {
-        intermediate.path()
-          .join(name)
-          .to_path_buf()
-      } else {
-        intermediate.path()
-          .join(format!("{}", idx))
-          .to_path_buf()
-      };
-
-      println!("output: {}", out.display());
-
-      let cant_fail = cmd.cant_fail;
-
-      match cmd.cmd {
-        CommandKind::External(ref mut sys_cmd, Some(out_arg)) => {
-          if cmd.prev_outputs {
-            for prev in prev_output.drain(..) {
-              sys_cmd.arg(prev);
-            }
-          }
-
-          if cmd.output_override {
-            prev_output.push(out.to_path_buf());
-            sys_cmd.arg(out_arg);
-            sys_cmd.arg(out.as_path());
-          }
-
-          let mut child = sys_cmd.spawn()?;
-          let result = child.wait()?;
-
-          if cant_fail {
-            continue;
-          }
-
-          if !result.success() {
-            println!("command failed!");
-            return Err(CommandQueueError::ProcessError(result.code()));
-          }
-        },
-        CommandKind::External(ref mut sys_cmd, None) if !is_last || self.final_output.is_none() => {
-          if cmd.prev_outputs {
-            for prev in prev_output.drain(..) {
-              sys_cmd.arg(prev);
-            }
-          }
-
-          let mut child = sys_cmd.spawn()?;
-          let result = child.wait()?;
-
-          if cant_fail {
-            continue;
-          }
-
-          if !result.success() {
-            println!("command failed!");
-            return Err(CommandQueueError::ProcessError(result.code()));
-          }
-        },
-        CommandKind::External(_, None) if is_last && self.final_output.is_some() => {
-          panic!("internal error: last command in queue doesn't have a output param");
-        },
-        CommandKind::Tool(ref mut tool) => {
-          if cmd.prev_outputs {
-            for prev in prev_output.drain(..) {
-              tool.add_tool_input(prev)?;
-            }
-          }
-
-          let mut queue = if cmd.output_override {
-            tool.override_output(out.to_path_buf());
-            prev_output.push(out.to_path_buf());
-            CommandQueue::new(Some(out.to_path_buf()))
-          } else {
-            let o = tool.get_output()
-              .map(|v| v.to_path_buf() );
-            if let Some(o) = o.as_ref() {
-              out = o.to_path_buf();
-            }
-            CommandQueue::new(o)
-          };
-
-          tool.enqueue_commands(&mut queue)?;
-          queue.run_all()?;
-        },
-        _ => { unreachable!(); }
-      }
-
-      if let Some(copy_to) = cmd.copy_output_to.as_ref() {
-        copy(out, copy_to)?;
-      }
-    }
-
-    if boolean_env("WASM_TOOLCHAIN_SAVE_TMPS") {
-      let tmp = intermediate.into_path();
-      println!("Saving tmps in `{}`.", tmp.display());
-    }
-
-    Ok(())
-  }
-}
-
 pub fn boolean_env<K>(k: K) -> bool
   where K: AsRef<std::ffi::OsStr>,
 {
@@ -978,8 +727,8 @@ pub type ToolArgs<This> = Vec<&'static ToolArg<This>>;
     };
 );
 
-pub trait Tool: fmt::Debug {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>>;
+pub trait Tool: fmt::Debug + Sized {
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>>;
 
   fn get_name(&self) -> String;
 
@@ -1153,7 +902,7 @@ pub fn main_inner<T>() -> Result<(), CommandQueueError>
   commands.set_dry_run(no_op);
   invocation.enqueue_commands(&mut commands)?;
 
-  commands.run_all()
+  commands.run_all(&mut invocation)
 }
 
 pub fn main<T>(outs: Option<(&mut Write, &mut Write)>)
@@ -1216,7 +965,7 @@ fn main_crash_test() {
   }
 
   impl Tool for Panic {
-    fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), String> { unimplemented!() }
+    fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), String> { unimplemented!() }
 
     fn get_name(&self) -> String { unimplemented!() }
 

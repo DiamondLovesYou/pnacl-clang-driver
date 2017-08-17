@@ -549,7 +549,7 @@ BASIC OPTIONS:
     }
   }
 
-  fn queue_clang(&mut self, queue: &mut CommandQueue) {
+  fn queue_clang(&mut self, queue: &mut CommandQueue<Self>) {
     // build the cmd:
     if !self.is_pch_mode() {
       let mut cmd = self.clang_base_cmd();
@@ -582,7 +582,7 @@ BASIC OPTIONS:
     }
   }
 
-  fn queue_ld(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>> {
+  fn queue_ld(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     let ld = ld_driver::Invocation::default();
 
     let mut args = self.linker_args.clone();
@@ -624,7 +624,7 @@ BASIC OPTIONS:
 }
 
 impl Tool for Invocation {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>> {
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     if self.print_version {
       let mut clang_ver = self.clang_base_cmd();
       self.clang_add_std_args(&mut clang_ver);
@@ -894,32 +894,32 @@ argument!(impl W_FLAGS where { Some(r"^-W(.*)$"), None } for Invocation {
 });
 argument!(impl CAP_M_FLAGS where { Some(r"^-M$"), None } for Invocation {
     fn cap_m_args(this, _single, _cap) {
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.enabled = true;
     }
 });
 argument!(impl CAP_MM_FLAGS where { Some(r"^-MM$"), None } for Invocation {
     fn cap_mm_args(this, _single, _cap) {
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.enabled = true;
       md.system_headers = false;
     }
 });
 argument!(impl CAP_MG_FLAGS where { Some(r"^-MG$"), None } for Invocation {
     fn cap_mg_args(this, _single, _cap) {
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.allow_missing_headers = true;
     }
 });
 argument!(impl CAP_MP_FLAGS where { Some(r"^-MP$"), None } for Invocation {
     fn cap_mp_args(this, _single, _cap) {
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.phony_targets = true;
     }
 });
 argument!(impl CAP_MD_FLAGS where { Some(r"^-M(M)?D$"), None } for Invocation {
     fn cap_md_args(this, _single, cap) {
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.enabled = true;
       md.implied_cap_e = false;
       md.system_headers = cap.get(1).is_none();
@@ -930,7 +930,7 @@ argument!(impl CAP_MF_FLAGS where { None, Some(r"^-MF$") } for Invocation {
       let file = cap.get(0).unwrap().as_str();
       let file = Path::new(file).to_path_buf();
 
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.dest = Some(file);
     }
 });
@@ -940,7 +940,7 @@ argument!(impl CAP_MT_FLAGS where { None, Some(r"^-MT$") } for Invocation {
       let file = Path::new(file).to_path_buf();
       let file = MakeDepOutput::Exact(file);
 
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.output = Some(file);
     }
 });
@@ -950,7 +950,7 @@ argument!(impl CAP_MQ_FLAGS where { None, Some(r"^-MQ$") } for Invocation {
       let file = Path::new(file).to_path_buf();
       let file = MakeDepOutput::ExactQuote(file);
 
-      let mut md = &mut this.make_deps;
+      let md = &mut this.make_deps;
       md.output = Some(file);
     }
 });

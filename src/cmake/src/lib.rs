@@ -39,7 +39,7 @@ impl Default for Invocation {
 }
 
 impl Tool for Invocation {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue)
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>)
     -> Result<(), Box<Error>>
   {
     use std::process::Command;
@@ -68,7 +68,7 @@ impl Tool for Invocation {
     "wasm-cmake".to_string()
   }
 
-  fn add_tool_input(&mut self, input: PathBuf)
+  fn add_tool_input(&mut self, _input: PathBuf)
     -> Result<(), Box<Error>>
   {
     unimplemented!()
@@ -78,13 +78,13 @@ impl Tool for Invocation {
     None
   }
   /// Unconditionally set the output file.
-  fn override_output(&mut self, out: PathBuf) {
+  fn override_output(&mut self, _out: PathBuf) {
     panic!();
   }
 }
 
 impl ToolInvocation for Invocation {
-  fn check_state(&mut self, iteration: usize, _skip_inputs_check: bool)
+  fn check_state(&mut self, _iteration: usize, _skip_inputs_check: bool)
     -> Result<(), Box<Error>>
   {
     Ok(())

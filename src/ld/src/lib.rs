@@ -337,8 +337,8 @@ impl Invocation {
   }
 
   fn check_native_allowed(&self) -> Result<(), Box<Error>> {
-    /// this is a panic for debugging purposes.
-    /// TODO this should probably not be a panic.
+    // this is a panic for debugging purposes.
+    // TODO this should probably not be a panic.
     Ok(panic!("native code is never allowed"))
   }
 
@@ -419,7 +419,8 @@ impl util::ToolInvocation for Invocation {
   }
 }
 impl util::Tool for Invocation {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue) -> Result<(), Box<Error>> {
+  fn enqueue_commands(&mut self,
+                      queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     use std::fs::File;
     use std::env::home_dir;
     use std::io::{copy, Write};
@@ -460,7 +461,7 @@ impl util::Tool for Invocation {
     }
 
     while self.has_bitcode_inputs() {
-      /// all inputs will be give in absolute path form.
+      // all inputs will be give in absolute path form.
       let mut cmd = Command::new(self.tc.llvm_tool("llvm-link"));
       cmd.args(link_args.clone());
 
