@@ -1,7 +1,6 @@
 use super::{Invocation, link};
 use util::{CommandQueue};
 
-use tempdir::TempDir;
 use clang_driver;
 
 use std::error::Error;
@@ -28,7 +27,7 @@ const FILES: &'static [&'static str] = &[
 pub fn build_cxx(invoc: &Invocation,
                  libcxxabi_include: &PathBuf,
                  file: &'static str,
-                 queue: &mut &mut CommandQueue)
+                 queue: &mut &mut CommandQueue<Invocation>)
 {
   let full_file = invoc.tc.emscripten
     .join("system/lib/libcxxabi/src")
@@ -47,7 +46,7 @@ pub fn build_cxx(invoc: &Invocation,
   args.push(format!("-I{}", libcxxabi_include.display()));
   args.push("-std=c++11".to_string());
 
-  let mut cmd = queue
+  let cmd = queue
     .enqueue_tool(Some("clang++"),
                   clang, args, false,
                   None::<Vec<::tempdir::TempDir>>)
@@ -58,7 +57,7 @@ pub fn build_cxx(invoc: &Invocation,
 }
 
 pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue) -> Result<(), Box<Error>> {
+             mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
   let libcxxabi_include = invoc.tc.emscripten
     .join("system/lib/libcxxabi/include")
     .to_path_buf();
@@ -70,5 +69,7 @@ pub fn build(invoc: &Invocation,
               &mut queue);
   }
 
-  link(invoc, queue, "libcxxabi.so")
+  link(invoc, queue,
+       &["c"],
+       "libcxxabi.so")
 }

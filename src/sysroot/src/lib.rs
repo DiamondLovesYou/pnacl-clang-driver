@@ -1,8 +1,8 @@
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue};
@@ -63,12 +63,11 @@ impl Default for Invocation {
   }
 }
 
-#[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Ord, Eq, Hash, Clone, Copy)]
 pub enum SystemLibrary {
   LibC,
   LibCxx,
   LibCxxAbi,
-  LibDlMalloc,
   CompilerRt,
 }
 impl SystemLibrary { }
@@ -80,7 +79,6 @@ impl FromStr for SystemLibrary {
       "libc" => Ok(SystemLibrary::LibC),
       "libcxx" => Ok(SystemLibrary::LibCxx),
       "libcxxabi" => Ok(SystemLibrary::LibCxxAbi),
-      "libdlmalloc" => Ok(SystemLibrary::LibDlMalloc),
       "compiler-rt" => Ok(SystemLibrary::CompilerRt),
       _ => {
         Err(format!("unknown system library: {}", s))?
@@ -88,9 +86,40 @@ impl FromStr for SystemLibrary {
     }
   }
 }
+impl PartialOrd for SystemLibrary {
+  fn partial_cmp(&self, other: &SystemLibrary) -> Option<Ordering> {
+    let o = match (self, other) {
+      (&SystemLibrary::CompilerRt, &SystemLibrary::CompilerRt) |
+      (&SystemLibrary::LibC, &SystemLibrary::LibC) |
+      (&SystemLibrary::LibCxx, &SystemLibrary::LibCxx) |
+      (&SystemLibrary::LibCxxAbi, &SystemLibrary::LibCxxAbi) => Ordering::Equal,
+
+      (&SystemLibrary::CompilerRt,
+        _) => Ordering::Less,
+
+      (&SystemLibrary::LibC,
+        &SystemLibrary::CompilerRt) => Ordering::Greater,
+      (&SystemLibrary::LibC,
+        _) => Ordering::Less,
+
+      (&SystemLibrary::LibCxxAbi,
+        &SystemLibrary::LibC) |
+      (&SystemLibrary::LibCxxAbi,
+        &SystemLibrary::CompilerRt) => Ordering::Greater,
+      (&SystemLibrary::LibCxxAbi,
+        _) => Ordering::Less,
+
+      (&SystemLibrary::LibCxx,
+        _) => Ordering::Greater,
+    };
+
+    Some(o)
+  }
+}
+
 
 impl Tool for Invocation {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue)
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Invocation>)
     -> Result<(), Box<Error>>
   {
     let libraries = self.libraries.clone();
@@ -107,9 +136,6 @@ impl Tool for Invocation {
         SystemLibrary::LibCxxAbi => {
           libcxxabi::build(self, queue)?;
         },
-        SystemLibrary::LibDlMalloc => {
-          libdlmalloc::build(self, queue)?;
-        },
         SystemLibrary::CompilerRt => {
           compiler_rt::build(self, queue)?;
         }
@@ -123,7 +149,7 @@ impl Tool for Invocation {
     "wasm-sysroot".to_string()
   }
 
-  fn add_tool_input(&mut self, input: PathBuf)
+  fn add_tool_input(&mut self, _input: PathBuf)
     -> Result<(), Box<Error>>
   {
     unimplemented!()
@@ -133,7 +159,7 @@ impl Tool for Invocation {
     None
   }
   /// Unconditionally set the output file.
-  fn override_output(&mut self, out: PathBuf) {
+  fn override_output(&mut self, _out: PathBuf) {
     panic!();
   }
 }
@@ -142,6 +168,13 @@ impl ToolInvocation for Invocation {
   fn check_state(&mut self, iteration: usize, _skip_inputs_check: bool)
     -> Result<(), Box<Error>>
   {
+    match iteration {
+      1 => {
+        self.libraries.sort();
+      },
+      _ => {},
+    }
+
     Ok(())
   }
 
@@ -162,7 +195,9 @@ impl ToolInvocation for Invocation {
   }
 }
 
-pub fn link(invoc: &Invocation, queue: &mut CommandQueue,
+pub fn link(invoc: &Invocation,
+            queue: &mut CommandQueue<Invocation>,
+            s2wasm_libs: &[&str],
             out_name: &str)
   -> Result<(), Box<Error>>
 {
@@ -177,10 +212,16 @@ pub fn link(invoc: &Invocation, queue: &mut CommandQueue,
   linker.emit_wast = invoc.emit_wast;
   linker.emit_wasm = invoc.emit_wasm;
   linker.optimize = util::OptimizationGoal::Size;
+  //linker.ld_flags.push("--warn-unresolved-symbols".into());
+  //linker.shared = true;
   let libname = out_name[..out_name.len() - 3].to_string();
   linker.s2wasm_libname = Some(libname);
+  for &lib in s2wasm_libs.iter() {
+    linker.s2wasm_needed_libs
+      .push(format!("lib{}.so", lib));
+  }
 
-  let mut cmd = queue
+  let cmd = queue
     .enqueue_tool(Some("link"),
                   linker, args,
                   false,

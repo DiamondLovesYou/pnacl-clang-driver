@@ -347,12 +347,11 @@ BASIC OPTIONS:
     } else {
       match self.driver_mode {
         DriverMode::CXX => {
-          libs.push(PathBuf::from("-lc++"));
+          libs.push(PathBuf::from("-lcxx"));
         },
         _ => {}
       }
       libs.push(PathBuf::from("-lc"));
-      libs.push(PathBuf::from("-ldlmalloc"));
       libs.push(PathBuf::from("-lcxxabi"));
       libs
     }
@@ -589,6 +588,11 @@ BASIC OPTIONS:
     let inputs = self.inputs.iter()
       .map(|&(ref f, _)| format!("{}", f.display()) );
     args.extend(inputs);
+    // XXX
+    let i = self.get_default_lib_args()
+      .into_iter()
+      .map(|v| v.to_str().expect("non-utf8 path").to_string() );
+    args.extend(i);
     args.push("-target".to_string());
     args.push("wasm32-unknown-unknown".to_string());
     queue.enqueue_tool(Some("linker"),

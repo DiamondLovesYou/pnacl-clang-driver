@@ -15,65 +15,6 @@ extern crate regex;
 extern crate ar;
 extern crate tempdir;
 
-const BASE_UNRESOLVED: &'static [&'static str] = &[
-  // The following functions are implemented in the native support library.
-  // Before a .pexe is produced, they get rewritten to intrinsic calls.
-  // However, this rewriting happens after bitcode linking - so gold has
-  // to be told that these are allowed to remain unresolved.
-  "--allow-unresolved=memcpy",
-  "--allow-unresolved=memset",
-  "--allow-unresolved=memmove",
-  "--allow-unresolved=setjmp",
-  "--allow-unresolved=longjmp",
-
-  // These TLS layout functions are either defined by the ExpandTls
-  // pass or (for non-ABI-stable code only) by PNaCl's native support
-  // code.
-  "--allow-unresolved=__nacl_tp_tls_offset",
-  "--allow-unresolved=__nacl_tp_tdb_offset",
-
-  // __nacl_get_arch() is for non-ABI-stable code only.
-  "--allow-unresolved=__nacl_get_arch",
-];
-
-const SJLJ_UNRESOLVED: &'static [&'static str] = &[
-  // These symbols are defined by libsupc++ and the PNaClSjLjEH
-  // pass generates references to them.
-  "--undefined=__pnacl_eh_stack",
-  "--undefined=__pnacl_eh_resume",
-
-  // These symbols are defined by the PNaClSjLjEH pass and
-  // libsupc++ refers to them.
-  "--allow-unresolved=__pnacl_eh_type_table",
-  "--allow-unresolved=__pnacl_eh_action_table",
-  "--allow-unresolved=__pnacl_eh_filter_table",
-];
-
-const ZEROCOST_UNRESOLVED: &'static [&'static str] =
-  &["--allow-unresolved=_Unwind_Backtrace",
-    "--allow-unresolved=_Unwind_DeleteException",
-    "--allow-unresolved=_Unwind_GetCFA",
-    "--allow-unresolved=_Unwind_GetDataRelBase",
-    "--allow-unresolved=_Unwind_GetGR",
-    "--allow-unresolved=_Unwind_GetIP",
-    "--allow-unresolved=_Unwind_GetIPInfo",
-    "--allow-unresolved=_Unwind_GetLanguageSpecificData",
-    "--allow-unresolved=_Unwind_GetRegionStart",
-    "--allow-unresolved=_Unwind_GetTextRelBase",
-    "--allow-unresolved=_Unwind_PNaClSetResult0",
-    "--allow-unresolved=_Unwind_PNaClSetResult1",
-    "--allow-unresolved=_Unwind_RaiseException",
-    "--allow-unresolved=_Unwind_Resume",
-    "--allow-unresolved=_Unwind_Resume_or_Rethrow",
-    "--allow-unresolved=_Unwind_SetGR",
-    "--allow-unresolved=_Unwind_SetIP",
-  ];
-
-const SPECIAL_LIBS: &'static [(&'static str, (&'static str, bool))] =
-  &[("-lnacl", ("nacl_sys_private", true)),
-    ("-lpthread", ("pthread_private", false)),
-  ];
-
 #[derive(Clone, Debug)]
 pub struct Invocation {
   pub tc: WasmToolchain,
@@ -97,6 +38,7 @@ pub struct Invocation {
   pub emit_wasm: bool,
 
   pub s2wasm_libname: Option<String>,
+  pub s2wasm_needed_libs: Vec<String>,
 
   pub optimize: util::OptimizationGoal,
   pub lto: bool,
@@ -151,6 +93,7 @@ impl Default for Invocation {
       emit_wasm: true,
 
       s2wasm_libname: None,
+      s2wasm_needed_libs: vec![],
 
       optimize: Default::default(),
       lto: false,
@@ -290,20 +233,9 @@ impl Invocation {
     let expanded = expand_input(input, &self.search_paths[..], false)?;
     'outer: for input in expanded.into_iter() {
       let into = 'inner: loop {
-        let file = match &input {
+        let file: &PathBuf = match &input {
           &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
-          &Input::Library(_, ref p, ty) => {
-            if ty == AllowedTypes::Native {
-              writeln!(std::io::stderr(),
-                       "warning: native code is never allowed: {}",
-                       p.display())?;
-              continue 'outer;
-              //
-            } else {
-              self.has_bitcode_inputs = true;
-              break 'inner &mut self.bitcode_inputs;
-            }
-          },
+          &Input::Library(_, ref p, _) => p,
           &Input::Flag(ref _flag) => {
             panic!("TODO: linker scripts");
           }
@@ -318,7 +250,13 @@ impl Invocation {
             break 'inner &mut self.bitcode_inputs;
           },
           Some(Type::Wasm) => {
-            // These aren't linked.
+            // These aren't linked, but we need
+            // to pass them to s2wasm for use in metadata.
+            let name = file.file_name().unwrap()
+              .to_str()
+              .expect("non-utf8 library name");
+            self.s2wasm_needed_libs
+              .push(name.to_string());
             continue 'outer;
           },
           _ => {
@@ -466,7 +404,7 @@ impl util::Tool for Invocation {
       cmd.args(link_args.clone());
 
       {
-        let mut cmd = queue.enqueue_external(Some("link"), cmd,
+        let cmd = queue.enqueue_external(Some("link"), cmd,
                                              Some("-o"), false,
                                              Some(tmpdirs.clone()));
         cmd.copy_output_to = self.get_llvm_output();
@@ -484,7 +422,7 @@ impl util::Tool for Invocation {
         .arg(format!("{}", self.get_llc_optimization_goal()));
 
       {
-        let mut cmd = queue.enqueue_external(Some("llc"), cmd,
+        let cmd = queue.enqueue_external(Some("llc"), cmd,
                                              Some("-o"), false,
                                              None::<Vec<TempDir>>);
         cmd.copy_output_to = self.get_asm_output();
@@ -493,13 +431,15 @@ impl util::Tool for Invocation {
         break;
       }
 
-      let emscripten_cache = home_dir().unwrap()
-        .join(".emscripten_cache/wasm");
       let mut cmd = Command::new(self.tc.binaryen_tool("s2wasm"));
       if let Some(ref libname) = self.s2wasm_libname {
         cmd.arg(format!("--dylink-libname={}", libname));
       } else {
         cmd.arg("--dylink");
+      }
+      for lib in self.s2wasm_needed_libs.iter() {
+        cmd.arg("-l");
+        cmd.arg(lib);
       }
 
       if !self.emit_wast {
@@ -790,9 +730,9 @@ tool_argument!(STRIP_DEBUG_FLAG: Invocation = { Some(r"^(-S|--strip-debug)$"), N
 tool_argument!(LIBRARY: Invocation = { Some(r"^-l([^:]+)$"), Some(r"^-(l|-library)$") };
                fn add_library(this, single, cap) {
                  let i = if single {
-                   0
+                   1
                  } else {
-                   2
+                   0
                  };
                  let path = Path::new(cap.get(i).unwrap().as_str()).to_path_buf();
                  this.add_input(Input::Library(false, path, AllowedTypes::Any))

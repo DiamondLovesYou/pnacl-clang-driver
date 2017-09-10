@@ -8,7 +8,6 @@ use std::error::Error;
 use std::fs::read_dir;
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const SRC_DIR: &'static str = "system/lib/libc/musl/src";
 const MODULE_BLACKLIST: &'static [&'static str] = &[
@@ -144,9 +143,9 @@ impl State {
         let entry = entry?;
         let ft = entry.file_type()?;
         if ft.is_file() {
-          self.visit_file(entry.path().as_path());
+          self.visit_file(entry.path().as_path())?;
         } else if ft.is_dir() {
-          self.visit_dir(entry.path().as_path());
+          self.visit_dir(entry.path().as_path())?;
         } else {
           panic!("symlink unimplemented");
         }
@@ -159,7 +158,7 @@ impl State {
 
 pub fn build_c(invoc: &Invocation,
                file: &PathBuf,
-               queue: &mut &mut CommandQueue)
+               queue: &mut &mut CommandQueue<Invocation>)
 {
   let mut clang = clang_driver::Invocation::default();
   clang.driver_mode = clang_driver::DriverMode::CC;
@@ -180,7 +179,7 @@ pub fn build_c(invoc: &Invocation,
 
   args.push("-Oz".to_string());
 
-  let mut cmd = queue
+  let cmd = queue
     .enqueue_tool(Some("clang"),
                   clang, args, true,
                   None::<Vec<::tempdir::TempDir>>)
@@ -191,7 +190,7 @@ pub fn build_c(invoc: &Invocation,
 }
 
 pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue)
+             mut queue: &mut CommandQueue<Invocation>)
   -> Result<(), Box<Error>>
 {
   let src_dir = invoc.tc.emscripten
@@ -210,6 +209,9 @@ pub fn build(invoc: &Invocation,
   for file in state.files.iter() {
     build_c(invoc, file, &mut queue);
   }
+  super::libdlmalloc::build(invoc, queue)?;
 
-  link(invoc, queue, "libc.so")
+  link(invoc, queue,
+       &["compiler-rt"],
+       "libc.so")
 }

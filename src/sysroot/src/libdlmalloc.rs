@@ -1,19 +1,18 @@
-use super::{Invocation, link};
+use super::{Invocation};
 use util::{CommandQueue};
 
-use tempdir::TempDir;
 use clang_driver;
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 const FILES: &'static [&'static str] = &[
   "dlmalloc.c",
 ];
 
 pub fn build_cc(invoc: &Invocation,
-                 file: &'static str,
-                 queue: &mut &mut CommandQueue)
+                file: &'static str,
+                queue: &mut &mut CommandQueue<Invocation>)
 {
   let full_file = invoc.tc.emscripten
     .join("system/lib")
@@ -30,7 +29,7 @@ pub fn build_cc(invoc: &Invocation,
 
   args.push("-Oz".to_string());
 
-  let mut cmd = queue
+  let cmd = queue
     .enqueue_tool(Some("clang"),
                   clang, args, false,
                   None::<Vec<::tempdir::TempDir>>)
@@ -41,15 +40,13 @@ pub fn build_cc(invoc: &Invocation,
 }
 
 pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue)
+             mut queue: &mut CommandQueue<Invocation>)
   -> Result<(), Box<Error>>
 {
-
   for file in FILES.iter() {
     build_cc(invoc,
               file,
               &mut queue);
   }
-
-  link(invoc, queue, "libdlmalloc.so")
+  Ok(())
 }

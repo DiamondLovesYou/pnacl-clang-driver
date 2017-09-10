@@ -1,23 +1,20 @@
 use super::{Invocation, link};
 use util::{CommandQueue, get_crate_root};
 
-use tempdir::TempDir;
 use clang_driver;
-use ld_driver;
 
 use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const BLACKLIST: &'static [&'static str] = &[
   "gcc_personality_v0.c",
   "apple_versioning.c",
 ];
 
-pub fn build_cc(invoc: &Invocation,
+pub fn build_cc(_invoc: &Invocation,
                 full_file: &PathBuf,
-                queue: &mut &mut CommandQueue)
+                queue: &mut &mut CommandQueue<Invocation>)
   -> Result<(), Box<Error>>
 {
   let file = Path::new(full_file.file_name().unwrap())
@@ -35,7 +32,7 @@ pub fn build_cc(invoc: &Invocation,
 
   args.push("-Oz".to_string());
 
-  let mut cmd = queue
+  let cmd = queue
     .enqueue_tool(Some("clang"),
                   clang, args, false,
                   None::<Vec<::tempdir::TempDir>>)?;
@@ -47,7 +44,7 @@ pub fn build_cc(invoc: &Invocation,
 }
 
 pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue)
+             mut queue: &mut CommandQueue<Invocation>)
   -> Result<(), Box<Error>>
 {
   use std::fs::read_dir;
@@ -90,5 +87,5 @@ pub fn build(invoc: &Invocation,
              &mut queue)?;
   }
 
-  link(invoc, queue, "libcompiler-rt.so")
+  link(invoc, queue, &[], "libcompiler-rt.so")
 }
