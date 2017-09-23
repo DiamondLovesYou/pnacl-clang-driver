@@ -348,11 +348,11 @@ BASIC OPTIONS:
       match self.driver_mode {
         DriverMode::CXX => {
           libs.push(PathBuf::from("-lcxx"));
+          libs.push(PathBuf::from("-lcxxabi"));
         },
         _ => {}
       }
       libs.push(PathBuf::from("-lc"));
-      libs.push(PathBuf::from("-lcxxabi"));
       libs
     }
   }
