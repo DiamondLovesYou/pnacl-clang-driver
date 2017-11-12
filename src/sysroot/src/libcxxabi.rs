@@ -45,6 +45,7 @@ pub fn build_cxx(invoc: &Invocation,
   args.push("-Oz".to_string());
   args.push(format!("-I{}", libcxxabi_include.display()));
   args.push("-std=c++11".to_string());
+  super::add_default_args(&mut args);
 
   let cmd = queue
     .enqueue_tool(Some("clang++"),

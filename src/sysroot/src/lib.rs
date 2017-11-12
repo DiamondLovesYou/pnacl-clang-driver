@@ -195,6 +195,11 @@ impl ToolInvocation for Invocation {
   }
 }
 
+pub fn add_default_args(args: &mut Vec<String>) {
+  args.push("-fno-slp-vectorize".to_string());
+  args.push("-fno-vectorize".to_string());
+}
+
 pub fn link(invoc: &Invocation,
             queue: &mut CommandQueue<Invocation>,
             s2wasm_libs: &[&str],

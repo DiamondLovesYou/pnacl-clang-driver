@@ -31,6 +31,7 @@ pub fn build_cc(_invoc: &Invocation,
   let out_file = Path::new(&out_file).to_path_buf();
 
   args.push("-Oz".to_string());
+  super::add_default_args(&mut args);
 
   let cmd = queue
     .enqueue_tool(Some("clang"),

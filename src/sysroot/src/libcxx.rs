@@ -35,6 +35,7 @@ const FILES: &'static [&'static str] = &[
   "typeinfo.cpp",
   "utility.cpp",
   "valarray.cpp",
+  "variant.cpp",
 ];
 
 pub fn build_cxx(invoc: &Invocation,
@@ -56,10 +57,12 @@ pub fn build_cxx(invoc: &Invocation,
   let out_file = Path::new(&out_file).to_path_buf();
 
   args.push("-DLIBCXX_BUILDING_LIBCXXABI=1".to_string());
+  args.push("-D_LIBCPP_BUILDING_LIBRARY".to_string());
   args.push("-Oz".to_string());
   args.push(format!("-I{}", libcxxabi_include.display()));
   args.push("-std=c++11".to_string());
   args.push("-D_LIBCPP_ABI_VERSION=2".to_string());
+  super::add_default_args(&mut args);
 
   let cmd = queue
     .enqueue_tool(Some("clang++"),
