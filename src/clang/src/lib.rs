@@ -582,7 +582,8 @@ BASIC OPTIONS:
   }
 
   fn queue_ld(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
-    let ld = ld_driver::Invocation::default();
+    let mut ld = ld_driver::Invocation::default();
+    ld.optimize = self.optimization;
 
     let mut args = self.linker_args.clone();
     let inputs = self.inputs.iter()
