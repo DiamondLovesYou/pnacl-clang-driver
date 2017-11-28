@@ -311,7 +311,7 @@ impl<T> CommandQueue<T>
       ExternalCommand(cmd, output_arg.map(|v| From::from(v) ));
     let concrete = ConcreteCommand {
       name: name.map(|v| v.to_string() ),
-      cant_fail: cant_fail,
+      cant_fail,
       tmp_dirs: tmp_dirs
         .map(|dirs| {
           dirs.into_iter()
@@ -326,7 +326,7 @@ impl<T> CommandQueue<T>
     };
     let command = Command {
       cmd: kind,
-      concrete: concrete,
+      concrete,
     };
     let command = box command;
     let command = command as Box<ICommand<T>>;
@@ -348,7 +348,7 @@ impl<T> CommandQueue<T>
 
     let concrete = ConcreteCommand {
       name: name.map(|v| v.to_string() ),
-      cant_fail: cant_fail,
+      cant_fail,
       tmp_dirs: tmp_dirs
         .map(|dirs| {
           dirs.into_iter()
@@ -363,7 +363,7 @@ impl<T> CommandQueue<T>
     };
     let command = Command {
       cmd: CommandTool(invocation),
-      concrete: concrete,
+      concrete,
     };
     let command = box command;
     let command = command as Box<ICommand<T>>;
@@ -391,7 +391,7 @@ impl<T> CommandQueue<T>
     };
     let command = Command {
       cmd: kind,
-      concrete: concrete,
+      concrete,
     };
     let command = box command;
     let command = command as Box<ICommand<T>>;
