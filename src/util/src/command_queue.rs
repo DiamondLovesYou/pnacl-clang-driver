@@ -9,11 +9,16 @@ use std::ops::{Deref, DerefMut};
 use std::path::{PathBuf};
 use std::process;
 use std::rc::Rc;
+use std::sync::{Once, ONCE_INIT};
+use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT, Ordering};
 
 use tempdir::TempDir;
 
 use super::{ToolInvocation, process_invocation_args,
             boolean_env};
+
+static STOP_BEFORE_NEXT_JOB: AtomicBool = ATOMIC_BOOL_INIT;
+static CTRL_C_HANDLER: Once = ONCE_INIT;
 
 /// if Some(..), its value will be the argument used. The output will be
 /// written to a random temp folder && added to the next command's
@@ -57,6 +62,16 @@ pub struct ConcreteCommand {
   pub copy_output_to: Option<PathBuf>,
 }
 
+impl ConcreteCommand {
+  pub fn copy_output_to(&self, out: PathBuf) -> Result<(), Box<Error>> {
+    if let Some(copy_to) = self.copy_output_to.as_ref() {
+      copy(out, copy_to)?;
+    }
+
+    Ok(())
+  }
+}
+
 #[derive(Debug)]
 pub struct Command<T>
   where T: Debug,
@@ -81,15 +96,7 @@ impl<T> DerefMut for Command<T>
 }
 impl<T> Command<T>
   where T: Debug,
-{
-  fn copy_output_to(&self, out: PathBuf) -> Result<(), Box<Error>> {
-    if let Some(copy_to) = self.copy_output_to.as_ref() {
-      copy(out, copy_to)?;
-    }
-
-    Ok(())
-  }
-}
+{ }
 impl<T, U> ICommand<U> for Command<CommandTool<T>>
   where T: ToolInvocation + 'static,
 {
@@ -197,32 +204,34 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
   fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
 }
 
-trait ICommand<T> {
+pub trait ICommand<T> {
   fn run(&mut self, invoc: &mut &mut T,
          state: &mut RunState) -> Result<(), CommandQueueError>;
   fn concrete(&mut self) -> &mut ConcreteCommand;
 }
 
 #[derive(Debug)]
-struct RunState<'q> {
-  idx: usize,
-  final_output: Option<&'q PathBuf>,
-  prev_outputs: Vec<PathBuf>,
-  intermediate: Option<TempDir>,
-  is_last: bool,
+pub struct RunState<'q> {
+  pub idx: usize,
+  pub final_output: Option<&'q PathBuf>,
+  pub prev_outputs: Vec<PathBuf>,
+  pub intermediate: Option<TempDir>,
+  pub is_last: bool,
+  pub dry_run: bool,
 }
 impl<'q> RunState<'q> {
   fn new(final_output: Option<&'q PathBuf>) -> Result<RunState<'q>, Box<Error>> {
     Ok(RunState {
       idx: 0,
-      final_output: final_output,
+      final_output,
       prev_outputs: Vec::new(),
       intermediate: Some(TempDir::new("wasm-driver-cmd-queue-intermediates")?),
       is_last: false,
+      dry_run: false,
     })
   }
 
-  fn output(&self, intermediate_name: &Option<PathBuf>) -> PathBuf {
+  pub fn output(&self, intermediate_name: &Option<PathBuf>) -> PathBuf {
     if self.is_last && self.final_output.is_some() {
       self.final_output.as_ref().unwrap().to_path_buf()
     } else if let &Some(ref name) = intermediate_name {
@@ -237,6 +246,7 @@ impl<'q> RunState<'q> {
         .join(format!("{}", self.idx))
     }
   }
+  pub fn is_dry_run(&self) -> bool { self.dry_run }
 }
 impl<'q> Drop for RunState<'q> {
   fn drop(&mut self) {
@@ -254,6 +264,11 @@ impl<'q> Drop for RunState<'q> {
 pub enum CommandQueueError {
   Error(Box<Error>),
   ProcessError(Option<i32>),
+}
+impl From<String> for CommandQueueError {
+  fn from(v: String) -> CommandQueueError {
+    CommandQueueError::Error(From::from(v))
+  }
 }
 impl From<Box<Error>> for CommandQueueError {
   fn from(v: Box<Error>) -> CommandQueueError {
@@ -278,8 +293,18 @@ impl<T> CommandQueue<T>
   where T: ToolInvocation + 'static,
 {
   pub fn new(final_output: Option<PathBuf>) -> CommandQueue<T> {
+    CTRL_C_HANDLER.call_once(|| {
+      use ctrlc::set_handler;
+      let r = set_handler(|| {
+        STOP_BEFORE_NEXT_JOB.store(true, Ordering::SeqCst);
+      });
+      if r.is_err() {
+        println!("Couldn't set ctrl-c handler");
+      }
+    });
+
     CommandQueue {
-      final_output: final_output,
+      final_output,
 
       queue: Default::default(),
       verbose: false,
@@ -400,6 +425,15 @@ impl<T> CommandQueue<T>
     self.queue.last_mut().unwrap().concrete()
   }
 
+  pub fn enqueue_custom(&mut self, runner: Box<ICommand<T>>)
+    -> &mut ConcreteCommand
+  {
+    self.queue.push(runner);
+    self.queue.last_mut()
+      .unwrap()
+      .concrete()
+  }
+
   pub fn run_all(&mut self, mut invoc: &mut T) -> Result<(), CommandQueueError> {
     let cmd_len = self.queue.len();
     let iter =
@@ -413,6 +447,10 @@ impl<T> CommandQueue<T>
     let mut state =
       RunState::new(self.final_output.as_ref())?;
     for (is_last, idx, mut cmd) in iter {
+      if STOP_BEFORE_NEXT_JOB.load(Ordering::SeqCst) {
+        return Err(CommandQueueError::ProcessError(Some(1)));
+      }
+      state.dry_run = self.dry_run;
       state.is_last = is_last;
       state.idx = idx;
 

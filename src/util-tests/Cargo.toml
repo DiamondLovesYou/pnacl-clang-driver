@@ -5,7 +5,7 @@ repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "0.0.0"
 
 [dependencies]
-lazy_static = "0.2.8"
+lazy_static = "*"
 regex = "*"
 
 [dependencies.util]

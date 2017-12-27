@@ -1,9 +1,11 @@
 #![feature(trace_macros)]
 #![feature(box_syntax)]
 #![feature(macro_reexport)]
-#![feature(fnbox)]
+#![feature(fnbox, fn_traits, unboxed_closures)]
 #![cfg_attr(test, feature(set_stdio))]
 
+//use std::boxed::FnBox;
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self};
 use std::io::{Write};
@@ -14,9 +16,10 @@ use std::process;
 pub use command_queue::{CommandQueueError, CommandQueue,
                         Command};
 
-extern crate regex;
+pub extern crate regex;
 extern crate elf;
 extern crate tempdir;
+extern crate ctrlc;
 
 #[macro_use]
 extern crate lazy_static;
@@ -448,16 +451,83 @@ pub fn boolean_env<K>(k: K) -> bool
 /// The second param indicates whether the argument matched the single or split
 /// forms. True for single.
 pub type ToolArgActionFn<This> = fn(&mut This, bool, regex::Captures) -> Result<(), Box<Error>>;
+
+/*impl<'a, 'b, This> FnOnce<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
+  type Output = Result<(), Box<Error>>;
+  fn call_once(self, args: (&'a mut This, bool,
+                            regex::Captures<'b>)) -> Self::Output {
+    match self {
+      ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
+      ToolArgActionFn::Boxed(f) => f(args.0, args.1, args.2),
+    }
+  }
+}
+impl<'a, 'b, This> FnMut<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
+  fn call_mut(&mut self, args: (&'a mut This, bool,
+                                regex::Captures<'b>)) -> Self::Output {
+    match self {
+      &mut ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
+      &mut ToolArgActionFn::Boxed(ref mut f) => f(args.0, args.1, args.2),
+    }
+  }
+}
+impl<'a, 'b, This> Fn<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
+  fn call(&self, args: (&'a mut This, bool,
+                        regex::Captures<'b>)) -> Self::Output {
+    match self {
+      &ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
+      &ToolArgActionFn::Boxed(ref f) => f(args.0, args.1, args.2),
+    }
+  }
+}*/
+
 pub type ToolArgAction<This> = Option<ToolArgActionFn<This>>;
 
-pub struct ToolArg<This> {
-  pub single: Option<regex::Regex>,
-  pub split: Option<regex::Regex>, // Note there is no way to match on the next arg.
+pub struct ToolArg<This: ?Sized> {
+  pub name: Cow<'static, str>,
+  pub single: Option<Cow<'static, str>>,
+  pub split: Option<Cow<'static, str>>, // Note there is no way to match on the next arg.
 
   pub action: ToolArgAction<This>,
 }
 
-impl<This> fmt::Debug for ToolArg<This> {
+pub struct InitedToolArg<This: ?Sized> {
+  pub single: Option<regex::Regex>,
+  pub split: Option<regex::Regex>,
+
+  pub action: ToolArgAction<This>,
+}
+
+impl<'a, This> From<&'a ToolArg<This>> for InitedToolArg<This>
+  where This: ?Sized,
+{
+  fn from(v: &'a ToolArg<This>) -> InitedToolArg<This> {
+    let name = v.name.as_ref();
+    let single = v.single.as_ref();
+    let split = v.split.as_ref();
+    let action = v.action;
+
+    InitedToolArg {
+      single: single.map(|v| {
+        regex::Regex::new(v.as_ref())
+          .unwrap_or_else(|e| {
+            panic!("Invalid regex in argument {}: {:?}", name, e);
+          })
+      }),
+      split: split.map(|v| {
+        regex::Regex::new(v.as_ref())
+          .unwrap_or_else(|e| {
+            panic!("Invalid regex in argument {}: {:?}", name, e);
+          })
+      }),
+      action,
+    }
+  }
+}
+
+impl<This> fmt::Debug for ToolArg<This>
+  where This: ?Sized,
+{
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     let action_msg = if self.action.is_some() {
       "Some(..)"
@@ -468,8 +538,22 @@ impl<This> fmt::Debug for ToolArg<This> {
            self.single, self.split, action_msg)
   }
 }
+impl<This> Clone for ToolArg<This>
+  where This: ?Sized,
+{
+  fn clone(&self) -> Self {
+    ToolArg {
+      name: self.name.clone(),
+      single: self.single.clone(),
+      split: self.split.clone(),
+      action: self.action,
+    }
+  }
+}
 
-impl<This> ToolArg<This> {
+impl<This> InitedToolArg<This>
+  where This: ?Sized,
+{
   pub fn check<'a, T>(&self,
                       this: &mut This,
                       args: &mut Peekable<T>,
@@ -478,7 +562,6 @@ impl<This> ToolArg<This> {
     where T: Iterator,
           <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>
   {
-
     *count = 0;
     let res = {
       let first_arg = match args.peek() {
@@ -546,189 +629,307 @@ impl<This> ToolArg<This> {
 }
 
 // This is an array of arrays so multiple global arg arrays can be glued together.
-pub type ToolArgs<This> = Vec<&'static ToolArg<This>>;
+pub type ToolArgs<This> = Vec<ToolArg<This>>;
 
 #[macro_export] macro_rules! tool_arguments {
   ($ty:ty => [ $( $arg:expr, )* ]) => ({
     return Some(vec![
-      $(unsafe {
-        ::std::mem::transmute(&*($arg))
-      }),*
+      $(
+        ($arg).clone()
+      ),*
     ]);
   });
 }
 
-#[macro_export] macro_rules! tool_argument(
-    ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
-      fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
-        lazy_static! {
-          pub static ref $name: ::util::ToolArg<$ty> = {
-          ::util::ToolArg {
-            single: ($single_regex).map(|v| ::regex::Regex::new(v).unwrap() ),
-            split: ($split).map(|v| ::regex::Regex::new(v).unwrap() ),
-            action: Some($fn_name as util::ToolArgActionFn<$ty>),
-          }
-          };
-        }
-
-        fn $fn_name($this: &mut $ty, $single: bool, $cap: ::regex::Captures) ->
-            ::std::result::Result<(), Box<Error>>
-        {
-            $fn_body
-        }
+#[macro_export] macro_rules! expand_style (
+  (single_and_split_simple_path($path_name:ident) => $single:ident, $cap:ident) => {
+    let path = if !$single {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
     };
-    ($name:ident: $ty:ty = { $single_regex:expr, $split:expr }) => {
-        lazy_static! {
-          pub static ref $name: ::util::ToolArg<$ty> = {
-            ::util::ToolArg {
-            single: ($single_regex).map(|v| ::regex::Regex::new(v).unwrap() ),
-            split: ($split).map(|v| ::regex::Regex::new(v).unwrap() ),
-            action: None,
-            }
-          };
-        }
+    let $path_name = ::std::path::Path::new(path);
+  };
+  (single_and_split_int($ity:ident, $out_name:ident) => $single:ident, $cap:ident) => {
+    let str = if $single {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    };
+    let $out_name = $ity::from_str_radix(str, 10)?;
+  };
+  (simple_able_boolean($boolean_name:ident) => $single:ident, $cap:ident) => {
+    let sw = $cap.get(1).unwrap().as_str();
+    let $boolean_name = match sw {
+      "enable" => true,
+      "disable" => false,
+      _ => unreachable!(),
+    };
+  };
+  (simple_no_flag($boolean_name:ident) => $single:ident, $cap:ident) => {
+    let $boolean_name = match $cap.get(1) {
+      Some(v) if v.as_str() == "no-" => false,
+      _ => true,
+    };
+  };
+);
+
+#[macro_export] macro_rules! expand_style_single (
+  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
+  };
+  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=([0-9]*)$")))
+  };
+  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--(enable|disable)-",
+                                              $param, "$")))
+  };
+  (simple_no_flag($boolean_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--(no-)?",
+                                              $param, "$")))
+  };
+);
+#[macro_export] macro_rules! expand_style_split (
+  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
+  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
+  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
+    None
+  };
+  (simple_no_flag($boolean_name:ident) => $param:expr) => {
+    None
+  };
+);
+
+/// TODO create a proc macro to handle the explosion of options
+#[macro_export] macro_rules! tool_argument(
+    (pub $name:ident: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
+     fn $fn_name:ident($this_name:ident) $fn_body:block) =>
+  {
+    #[allow(non_snake_case)]
+    pub const $name: $crate::ToolArg<$ty> = $crate::ToolArg {
+      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+      single: expand_style_single!($style($($style_args),*) => $param_name),
+      split:  expand_style_split!($style($($style_args),*) => $param_name),
+      action: Some(|this, single, cap| {
+        $fn_name(this, single, cap)
+      }),
+    };
+    #[allow(unused_variables)]
+    fn $fn_name($this_name: &mut $ty, single: bool, cap: $crate::regex::Captures)
+                -> ::std::result::Result<(), Box<::std::error::Error>>
+    {
+      expand_style!($style($($style_args),*) => single, cap);
+      Ok($fn_body)
     }
+  };
+  (pub $name:ident<$first_ty:ident $(,$tys:ident)*>: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
+   fn $fn_name:ident($this_name:ident)
+   where $($where_tys:path : $where_clauses:path,)+
+   $fn_body:block) =>
+  {
+    #[allow(non_snake_case)]
+    let $name: $crate::ToolArg<$ty> = $crate::ToolArg {
+     name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+     single: expand_style_single!($style($($style_args),*) => $param_name),
+     split:  expand_style_split!($style($($style_args),*) => $param_name),
+     action: Some(|this, single, cap| {
+       $fn_name(this, single, cap)
+     }),
+   };
+    #[allow(unused_variables)]
+    fn $fn_name<$first_ty $(,$tys)*>($this_name: &mut $first_ty, single: bool, cap: $crate::regex::Captures)
+                                     -> ::std::result::Result<(), Box<::std::error::Error>>
+      where $($where_tys : $where_clauses,)+
+    {
+      expand_style!($style($($style_args),*) => single, cap);
+      Ok($fn_body)
+    }
+  };
+
+  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
+   fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
+    lazy_static! {
+      pub static ref $name: ::util::ToolArg<$ty> = {
+        ::util::ToolArg {
+          single: ($single_regex).map(|v| From::from(v) ),
+          split: ($split).map(|v| From::from(v) ),
+          action: Some($fn_name as util::ToolArgActionFn<$ty>),
+        }
+      };
+    }
+
+    fn $fn_name($this: &mut $ty, $single: bool, $cap: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body
+    }
+  };
+  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr }) => {
+    lazy_static! {
+      pub static ref $name: ::util::ToolArg<$ty> = {
+        ::util::ToolArg {
+          single: ($single_regex).map(|v| From::from(v) ),
+          split: ($split).map(|v| From::from(v) ),
+          action: None,
+        }
+      };
+    }
+  }
 );
 
 #[macro_export] macro_rules! argument(
-    (impl $name:ident where { Some($single:expr), None } for $this:ty {
-        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-    }) => (
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-            $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split:  None,
+  (impl $name:ident where { Some($single:expr), None } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => (
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split:  None,
 
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-          }
-          };
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
-        #[allow(unreachable_code)]
-        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
-            ::std::result::Result<(), Box<Error>>
-        {
-            $fn_body;
-            Ok(())
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  );
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: None,
+          split: Some($crate::regex::Regex::new($split).unwrap()),
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
-    );
-    (impl $name:ident where { None, Some($split:expr) } for $this:ty {
-        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-    }) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-            $crate::ToolArg {
-            single: None,
-            split: Some(::regex::Regex::new($split).unwrap()),
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-            }
-          };
-        }
-        #[allow(unreachable_code)]
-        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
-            ::std::result::Result<(), Box<Error>>
-        {
-            $fn_body;
-            Ok(())
-        }
-    };
-    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty {
-        fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-    }) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-          $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split:  Some(::regex::Regex::new($split).unwrap()),
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split:  Some($crate::regex::Regex::new($split).unwrap()),
 
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-          }
-          };
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
-        #[allow(unreachable_code)]
-        fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: ::regex::Captures) ->
-            ::std::result::Result<(), Box<Error>>
-        {
-            $fn_body;
-            Ok(())
-        }
-    };
-
-
-
-    (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-            $crate::ToolArg {
-              single: Some(::regex::Regex::new($single).unwrap()),
-              split: None,
-              action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-            }
-          };
-        }
-    };
-    (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-            $crate::ToolArg {
-              single: None,
-              split: Some(::regex::Regex::new($split).unwrap()),
-              action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-            }
-          };
-        }
-    };
-    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-          $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split: Some(::regex::Regex::new($split).unwrap()),
-
-            action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-          }
-          };
-        }
-    };
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  };
 
 
-    (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
-        lazy_static! {
-          pub static ref $name: $crate::ToolArg<$this> = {
-            $crate::ToolArg {
-              single: Some(::regex::Regex::new($single).unwrap()),
-              split: None,
-              action: None,
-            }
-          };
+
+  (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split: None,
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
-    };
-    (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
-      lazy_static! {
-        pub static ref $name: $crate::ToolArg<$this> = {
-          $crate::ToolArg {
-            single: None,
-            split: Some(::regex::Regex::new($split).unwrap()),
-            action: None,
-          }
-        };
-      }
-    };
-    (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
-      lazy_static! {
-        pub static ref $name: $crate::ToolArg<$this> = {
-          $crate::ToolArg {
-            single: Some(::regex::Regex::new($single).unwrap()),
-            split: Some(r::regex::Regex::new($split).unwrap()),
-            action: None,
-          }
-        };
-      }
-    };
+      };
+    }
+  };
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: None,
+          split: Some($crate::regex::Regex::new($split).unwrap()),
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split: Some($crate::regex::Regex::new($split).unwrap()),
+
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+  };
+
+
+  (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split: None,
+          action: None,
+        }
+      };
+    }
+  };
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: None,
+          split: Some($crate::regex::Regex::new($split).unwrap()),
+          action: None,
+        }
+      };
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          single: Some($crate::regex::Regex::new($single).unwrap()),
+          split: Some($crate::regex::Regex::new($split).unwrap()),
+          action: None,
+        }
+      };
+    }
+  };
 );
 
-pub trait Tool: fmt::Debug + Sized {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>>;
+pub trait Tool: fmt::Debug {
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>>
+    where Self: Sized;
 
   fn get_name(&self) -> String;
 
@@ -744,7 +945,7 @@ pub trait ToolInvocation: Tool + Default {
   fn check_state(&mut self, iteration: usize, skip_inputs_check: bool) -> Result<(), Box<Error>>;
 
   /// Called until `None` is returned. Put args that override errors before
-  /// the the args that can have those errors.
+  /// the the args that can have those errors
   fn args(&self, iteration: usize) -> Option<ToolArgs<Self>>;
 }
 
@@ -772,6 +973,10 @@ pub fn process_invocation_args<T>(invocation: &mut T,
 
     if next_args.is_none() { break; }
     let next_args = next_args.unwrap();
+    let next_args: Vec<InitedToolArg<_>> = next_args
+      .into_iter()
+      .map(|v| (&v).into() )
+      .collect();
 
     //println!("iteration `{}`", iteration);
 
@@ -863,7 +1068,7 @@ pub fn process_invocation_args<T>(invocation: &mut T,
   Ok(())
 }
 
-pub fn main_inner<T>() -> Result<(), CommandQueueError>
+pub fn main_inner<T>(invocation: Option<T>) -> Result<T, CommandQueueError>
     where T: ToolInvocation + 'static,
 {
   use std::env;
@@ -891,9 +1096,11 @@ pub fn main_inner<T>() -> Result<(), CommandQueueError>
       .collect()
   };
 
-  let mut invocation: T = Default::default();
-
-  process_invocation_args(&mut invocation, args, false)?;
+  let process_args = invocation.is_none();
+  let mut invocation: T = invocation.unwrap_or_default();
+  if process_args {
+    process_invocation_args(&mut invocation, args, false)?;
+  }
 
   let output = invocation.get_output()
     .map(|out| out.clone() );
@@ -903,6 +1110,9 @@ pub fn main_inner<T>() -> Result<(), CommandQueueError>
   invocation.enqueue_commands(&mut commands)?;
 
   commands.run_all(&mut invocation)
+    .map(move |_| {
+      invocation
+    })
 }
 
 pub fn main<T>(outs: Option<(&mut Write, &mut Write)>)
@@ -926,7 +1136,10 @@ pub fn main<T>(outs: Option<(&mut Write, &mut Write)>)
 
   let (_, err) = outs.unwrap_or((&mut stdout, &mut stderr));
 
-  match catch_unwind(main_inner::<T>) {
+  match catch_unwind(move || {
+    main_inner(None::<T>)?;
+    Ok(())
+  }) {
     Ok(Err(CommandQueueError::Error(msg))) => {
       write!(err, "{}\n", msg)
         .unwrap();

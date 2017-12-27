@@ -10,7 +10,8 @@ regex = "*"
 
 [dependencies]
 ar = "0.3.0"
-lazy_static = "0.2"
+ctrlc = "3.0.3"
+lazy_static = "1.0"
 maplit = "*"
 regex = "*"
 tempdir = "0.3.5"
@@ -22,7 +23,4 @@ git = "https://github.com/cole14/rust-elf.git"
 default = ["wasm"]
 nacl = []
 wasm = []
-
-[target]
-
 [target.wasm32-unknown-emscripten]
