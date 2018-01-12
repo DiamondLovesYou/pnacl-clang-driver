@@ -452,35 +452,6 @@ pub fn boolean_env<K>(k: K) -> bool
 /// forms. True for single.
 pub type ToolArgActionFn<This> = fn(&mut This, bool, regex::Captures) -> Result<(), Box<Error>>;
 
-/*impl<'a, 'b, This> FnOnce<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
-  type Output = Result<(), Box<Error>>;
-  fn call_once(self, args: (&'a mut This, bool,
-                            regex::Captures<'b>)) -> Self::Output {
-    match self {
-      ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
-      ToolArgActionFn::Boxed(f) => f(args.0, args.1, args.2),
-    }
-  }
-}
-impl<'a, 'b, This> FnMut<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
-  fn call_mut(&mut self, args: (&'a mut This, bool,
-                                regex::Captures<'b>)) -> Self::Output {
-    match self {
-      &mut ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
-      &mut ToolArgActionFn::Boxed(ref mut f) => f(args.0, args.1, args.2),
-    }
-  }
-}
-impl<'a, 'b, This> Fn<(&'a mut This, bool, regex::Captures<'b>)> for ToolArgActionFn<This> {
-  fn call(&self, args: (&'a mut This, bool,
-                        regex::Captures<'b>)) -> Self::Output {
-    match self {
-      &ToolArgActionFn::Fn(f) => f(args.0, args.1, args.2),
-      &ToolArgActionFn::Boxed(ref f) => f(args.0, args.1, args.2),
-    }
-  }
-}*/
-
 pub type ToolArgAction<This> = Option<ToolArgActionFn<This>>;
 
 pub struct ToolArg<This: ?Sized> {
@@ -644,23 +615,23 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
 #[macro_export] macro_rules! expand_style (
   (single_and_split_simple_path($path_name:ident) => $single:ident, $cap:ident) => {
     let path = if !$single {
-      $cap.get(1)
+      $cap.get(0)
         .unwrap()
         .as_str()
     } else {
-      $cap.get(0)
+      $cap.get(1)
         .unwrap()
         .as_str()
     };
     let $path_name = ::std::path::Path::new(path);
   };
   (single_and_split_int($ity:ident, $out_name:ident) => $single:ident, $cap:ident) => {
-    let str = if $single {
-      $cap.get(1)
+    let str = if !$single {
+      $cap.get(0)
         .unwrap()
         .as_str()
     } else {
-      $cap.get(0)
+      $cap.get(1)
         .unwrap()
         .as_str()
     };
@@ -680,6 +651,18 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
       _ => true,
     };
   };
+  (single_and_split_from_str($out_name:ident) => $single:ident, $cap:ident) => {
+    let str = if !$single {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    };
+    let $out_name = ::std::str::FromStr::from_str(str)?;
+  };
 );
 
 #[macro_export] macro_rules! expand_style_single (
@@ -697,6 +680,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     Some(::std::borrow::Cow::Borrowed(concat!("^--(no-)?",
                                               $param, "$")))
   };
+  (single_and_split_from_str($out:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
+  };
 );
 #[macro_export] macro_rules! expand_style_split (
   (single_and_split_simple_path($path_name:ident) => $param:expr) => {
@@ -711,6 +697,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
   (simple_no_flag($boolean_name:ident) => $param:expr) => {
     None
   };
+  (single_and_split_from_str($out:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
 );
 
 /// TODO create a proc macro to handle the explosion of options
@@ -723,7 +712,7 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
       name: ::std::borrow::Cow::Borrowed(stringify!($name)),
       single: expand_style_single!($style($($style_args),*) => $param_name),
       split:  expand_style_split!($style($($style_args),*) => $param_name),
-      action: Some(|this, single, cap| {
+      action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
         $fn_name(this, single, cap)
       }),
     };
@@ -742,13 +731,13 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
   {
     #[allow(non_snake_case)]
     let $name: $crate::ToolArg<$ty> = $crate::ToolArg {
-     name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-     single: expand_style_single!($style($($style_args),*) => $param_name),
-     split:  expand_style_split!($style($($style_args),*) => $param_name),
-     action: Some(|this, single, cap| {
-       $fn_name(this, single, cap)
-     }),
-   };
+      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+      single: expand_style_single!($style($($style_args),*) => $param_name),
+      split:  expand_style_split!($style($($style_args),*) => $param_name),
+action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
+        $fn_name(this, single, cap)
+      }),
+    };
     #[allow(unused_variables)]
     fn $fn_name<$first_ty $(,$tys)*>($this_name: &mut $first_ty, single: bool, cap: $crate::regex::Captures)
                                      -> ::std::result::Result<(), Box<::std::error::Error>>
@@ -764,8 +753,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: ::util::ToolArg<$ty> = {
         ::util::ToolArg {
-          single: ($single_regex).map(|v| From::from(v) ),
-          split: ($split).map(|v| From::from(v) ),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: ($single_regex).map(|v: &str| From::from(v) ),
+          split: ($split).map(|v: &str| From::from(v) ),
           action: Some($fn_name as util::ToolArgActionFn<$ty>),
         }
       };
@@ -781,8 +771,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: ::util::ToolArg<$ty> = {
         ::util::ToolArg {
-          single: ($single_regex).map(|v| From::from(v) ),
-          split: ($split).map(|v| From::from(v) ),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: ($single_regex).map(|v: &str| From::from(v) ),
+          split: ($split).map(|v: &str| From::from(v) ),
           action: None,
         }
       };
@@ -797,7 +788,8 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
           split:  None,
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
@@ -818,8 +810,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
-          split: Some($crate::regex::Regex::new($split).unwrap()),
+          split: Some(From::from($split)),
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
       };
@@ -838,8 +831,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
-          split:  Some($crate::regex::Regex::new($split).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -860,7 +854,8 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
           split: None,
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -871,8 +866,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
-          split: Some($crate::regex::Regex::new($split).unwrap()),
+          split: Some(From::from($split)),
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
       };
@@ -882,8 +878,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
-          split: Some($crate::regex::Regex::new($split).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -896,7 +893,8 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
           split: None,
           action: None,
         }
@@ -907,8 +905,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
-          split: Some($crate::regex::Regex::new($split).unwrap()),
+          split: Some(From::from($split)),
           action: None,
         }
       };
@@ -918,8 +917,9 @@ pub type ToolArgs<This> = Vec<ToolArg<This>>;
     lazy_static! {
       pub static ref $name: $crate::ToolArg<$this> = {
         $crate::ToolArg {
-          single: Some($crate::regex::Regex::new($single).unwrap()),
-          split: Some($crate::regex::Regex::new($split).unwrap()),
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
           action: None,
         }
       };
