@@ -2,6 +2,8 @@
 use std::env::{var_os};
 use std::path::{Path, PathBuf};
 
+use CreateIfNotExists;
+
 const BINARYEN_ROOT_ENV: &'static str = "BINARYEN";
 const EMSCRIPTEN_ROOT_ENV: &'static str = "EMSCRIPTEN";
 const LLVM_ROOT_ENV: &'static str = "LLVM_ROOT";
@@ -55,6 +57,8 @@ impl WasmToolchain {
     use std::env::home_dir;
     home_dir().unwrap()
       .join(".emscripten_cache/wasm")
+      .create_if_not_exists()
+      .expect("creating emscripten cache dir")
   }
 }
 impl Default for WasmToolchain {

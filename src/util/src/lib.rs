@@ -32,6 +32,19 @@ pub mod ldtools;
 pub mod toolchain;
 pub mod command_queue;
 
+pub trait CreateIfNotExists: Sized {
+  fn create_if_not_exists(self) -> std::io::Result<Self>;
+}
+impl CreateIfNotExists for PathBuf {
+  fn create_if_not_exists(self) -> std::io::Result<Self> {
+    if !self.exists() {
+      std::fs::create_dir_all(&self)?;
+    }
+
+    Ok(self)
+  }
+}
+
 #[cfg(feature = "nacl")]
 pub const SDK_VERSION: &'static str = include_str!(concat!(env!("OUT_DIR"),
                                                            "/REV"));
@@ -230,13 +243,17 @@ impl Arch {
             }
         );
 
-    let mut os = check_triple_format(split.next(), triple.as_ref())?;
-    while os == "unknown" {
-      os = check_triple_format(split.next(), triple.as_ref())?;
-      if split.peek().is_none() {
-        break;
-      }
-    }
+    let env = check_triple_format(split.next(), triple.as_ref())?;
+    let os = if split.peek().is_none() {
+      env
+    } else {
+      check_triple_format(split.next(), triple.as_ref())?
+    };
+    let format = if split.peek().is_some() {
+      Some(check_triple_format(split.next(), triple.as_ref())?)
+    } else {
+      None
+    };
 
     let nacl_or_wasm = os == "nacl" || (arch.is_wasm() && os == "unknown");
     if nacl_or_wasm && split.peek().is_none() {

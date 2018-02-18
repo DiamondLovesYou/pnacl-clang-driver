@@ -49,6 +49,19 @@ impl<T> Debug for FunctionCommand<T> {
     }
   }
 }
+pub struct FunctionCommandWithState<T>(Option<Box<FnBox(&mut &mut T, &mut RunState) -> Result<(), CommandQueueError>>>);
+impl<T> Debug for FunctionCommandWithState<T> {
+  fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+    match self {
+      &FunctionCommandWithState(Some(..)) => {
+        write!(fmt, "FunctionCommandWithState(Some(..))")
+      },
+      &FunctionCommandWithState(None) => {
+        write!(fmt, "FunctionCommandWithState(None)")
+      },
+    }
+  }
+}
 
 #[derive(Debug)]
 pub struct ConcreteCommand {
@@ -145,6 +158,18 @@ impl<T> ICommand<T> for Command<FunctionCommand<T>>
 
     let f = self.cmd.0.take().unwrap();
     Ok(FnBox::call_box(f, (invoc,))?)
+  }
+  fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
+}
+impl<T> ICommand<T> for Command<FunctionCommandWithState<T>>
+  where T: ToolInvocation,
+{
+  fn run(&mut self, invoc: &mut &mut T,
+         state: &mut RunState) -> Result<(), CommandQueueError> {
+    println!("on command: {:?} => {:?}", self.name, self.cmd);
+
+    let f = self.cmd.0.take().unwrap();
+    Ok(FnBox::call_box(f, (invoc, state))?)
   }
   fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
 }
@@ -397,16 +422,45 @@ impl<T> CommandQueue<T>
 
     Ok(self.queue.last_mut().unwrap().concrete())
   }
-  pub fn enqueue_function<F>(&mut self,
-                             name: Option<&'static str>,
-                             f: F)
+  pub fn enqueue_function<U, F>(&mut self,
+                                name: Option<U>,
+                                f: F)
     -> &mut ConcreteCommand
-    where F: FnOnce(&mut &mut T) -> Result<(), CommandQueueError> + 'static,
+    where U: Into<String>,
+          F: FnOnce(&mut &mut T) -> Result<(), CommandQueueError> + 'static,
   {
     let f_box = box f as Box<_>;
     let kind = FunctionCommand(Some(f_box));
     let concrete = ConcreteCommand {
-      name: name.map(|v| v.to_string() ),
+      name: name.map(|v| v.into() ),
+      cant_fail: false,
+      tmp_dirs: Default::default(),
+      intermediate_name: None,
+      prev_outputs: false,
+      output_override: false,
+      copy_output_to: None,
+    };
+    let command = Command {
+      cmd: kind,
+      concrete,
+    };
+    let command = box command;
+    let command = command as Box<ICommand<T>>;
+
+    self.queue.push(command);
+    self.queue.last_mut().unwrap().concrete()
+  }
+  pub fn enqueue_state_function<U, F>(&mut self,
+                                      name: Option<U>,
+                                      f: F)
+    -> &mut ConcreteCommand
+    where U: Into<String>,
+          F: FnOnce(&mut &mut T, &mut RunState) -> Result<(), CommandQueueError> + 'static,
+  {
+    let f_box = box f as Box<_>;
+    let kind = FunctionCommandWithState(Some(f_box));
+    let concrete = ConcreteCommand {
+      name: name.map(|v| v.into() ),
       cant_fail: false,
       tmp_dirs: Default::default(),
       intermediate_name: None,
