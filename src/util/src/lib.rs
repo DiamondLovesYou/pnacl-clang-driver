@@ -1,6 +1,5 @@
 #![feature(trace_macros)]
 #![feature(box_syntax)]
-#![feature(macro_reexport)]
 #![feature(fnbox, fn_traits, unboxed_closures)]
 #![cfg_attr(test, feature(set_stdio))]
 
@@ -26,6 +25,386 @@ extern crate lazy_static;
 
 #[macro_use]
 extern crate maplit;
+
+#[macro_export] macro_rules! tool_arguments {
+  ($ty:ty => [ $( $arg:expr, )* ]) => ({
+    Some(vec![
+      $(
+        ($arg).clone()
+      ),*
+    ].into())
+  });
+}
+
+#[macro_export] macro_rules! expand_style (
+  (single_and_split_simple_path($path_name:ident) => $single:ident, $cap:ident) => {
+    let path = if !$single {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    };
+    let $path_name = ::std::path::Path::new(path);
+  };
+  (single_and_split_abs_path($path_name:ident) => $single:ident, $cap:ident) => {
+    expand_style!(single_and_split_simple_path($path_name) => $single, $cap);
+    let $path_name = ::std::env::current_dir()?.join($path_name);
+  };
+  (single_and_split_abs_path($path_name:ident, $hyphen:ident) => $single:ident, $cap:ident) => {
+    expand_style!(single_and_split_abs_path($path_name) => $single, $cap);
+  };
+  (single_and_split_str($name:ident) => $single:ident, $cap:ident) => {
+    let $name = if !$single {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    };
+  };
+  (single_and_split_int($ity:ident, $out_name:ident) => $single:ident, $cap:ident) => {
+    let str = if !$single {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    };
+    let $out_name = $ity::from_str_radix(str, 10)?;
+  };
+  (simple_able_boolean($boolean_name:ident) => $single:ident, $cap:ident) => {
+    let sw = $cap.get(1).unwrap().as_str();
+    let $boolean_name = match sw {
+      "enable" => true,
+      "disable" => false,
+      _ => unreachable!(),
+    };
+  };
+  (simple_no_flag($boolean_name:ident) => $single:ident, $cap:ident) => {
+    let $boolean_name = match $cap.get(1) {
+      Some(v) if v.as_str() == "no-" => false,
+      _ => true,
+    };
+  };
+  (single_and_split_from_str($out_name:ident) => $single:ident, $cap:ident) => {
+    let str = if !$single {
+      $cap.get(0)
+        .unwrap()
+        .as_str()
+    } else {
+      $cap.get(1)
+        .unwrap()
+        .as_str()
+    };
+    let $out_name = ::std::str::FromStr::from_str(str)?;
+  };
+  (single_and_split_from_str($out_name:ident, $hyphen_mode:ident) => $single:ident, $cap:ident) => {
+    expand_style!(single_and_split_from_str($out_name) => $single, $cap)
+  };
+  (short_flag($out_name:ident, $hyphen_is_required:ident) => $single:ident, $cap:ident) => {
+     let $out_name = true;
+  };
+);
+
+#[macro_export] macro_rules! expand_style_single (
+  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
+  };
+  (single_and_split_abs_path($path_name:ident) => $param:expr) => {
+    expand_style_single!(single_and_split_simple_path($path_name) => $param)
+  };
+  (single_and_split_abs_path($path_name:ident, no_hyphen) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^-",$param,"=(.*)$")))
+  };
+  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=([0-9]*)$")))
+  };
+  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--(enable|disable)-",
+                                              $param, "$")))
+  };
+  (simple_no_flag($boolean_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--(no-)?",
+                                              $param, "$")))
+  };
+  (single_and_split_from_str($out:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
+  };
+  (single_and_split_from_str($out:ident, optional_hyphen) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--?",$param,"=(.*)$")))
+  };
+  (short_flag($out:ident, disallowed) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^-", $param, "$")))
+  };
+  (short_flag($out:ident, optional) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--?", $param, "$")))
+  };
+  (short_flag($out:ident, required) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--", $param, "$")))
+  };
+);
+#[macro_export] macro_rules! expand_style_split (
+  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
+  (single_and_split_abs_path($path_name:ident) => $param:expr) => {
+    expand_style_split!(single_and_split_simple_path($path_name) => $param)
+  };
+  (single_and_split_abs_path($path_name:ident, no_hyphen) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^-",$param,"$")))
+  };
+  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
+  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
+    None
+  };
+  (simple_no_flag($boolean_name:ident) => $param:expr) => {
+    None
+  };
+  (single_and_split_from_str($out:ident) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
+  };
+  (single_and_split_from_str($out:ident, optional_hyphen) => $param:expr) => {
+    Some(::std::borrow::Cow::Borrowed(concat!("^--?",$param,"$")))
+  };
+  (short_flag($out:ident, $hyphen_is_required:ident) => $param:expr) => {
+    None
+  };
+);
+
+/// TODO create a proc macro to handle the explosion of options
+#[macro_export] macro_rules! tool_argument(
+    (pub $name:ident: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
+     fn $fn_name:ident($this_name:ident) $fn_body:block) =>
+  {
+    #[allow(non_snake_case)]
+    pub const $name: $crate::ToolArg<$ty> = $crate::ToolArg {
+      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+      single: expand_style_single!($style($($style_args),*) => $param_name),
+      split:  expand_style_split!($style($($style_args),*) => $param_name),
+      action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
+        $fn_name(this, single, cap)
+      }),
+    };
+    #[allow(unused_variables)]
+    fn $fn_name($this_name: &mut $ty, single: bool, cap: $crate::regex::Captures)
+                -> ::std::result::Result<(), Box<::std::error::Error>>
+    {
+      expand_style!($style($($style_args),*) => single, cap);
+      Ok($fn_body)
+    }
+  };
+  (pub $name:ident<$first_ty:ident $(,$tys:ident)*>: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
+   fn $fn_name:ident($this_name:ident)
+   where $($where_tys:path : $where_clauses:path,)+
+   $fn_body:block) =>
+  {
+    #[allow(non_snake_case)]
+    let $name: $crate::ToolArg<$ty> = $crate::ToolArg {
+      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+      single: expand_style_single!($style($($style_args),*) => $param_name),
+      split:  expand_style_split!($style($($style_args),*) => $param_name),
+      action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
+        $fn_name(this, single, cap)
+      }),
+    };
+    #[allow(unused_variables)]
+    fn $fn_name<$first_ty $(,$tys)*>($this_name: &mut $first_ty, single: bool, cap: $crate::regex::Captures)
+                                     -> ::std::result::Result<(), Box<::std::error::Error>>
+      where $($where_tys : $where_clauses,)+
+    {
+      expand_style!($style($($style_args),*) => single, cap);
+      Ok($fn_body)
+    }
+  };
+
+  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
+   fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
+    lazy_static! {
+      pub static ref $name: ::util::ToolArg<$ty> = {
+        ::util::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: ($single_regex).map(|v: &str| From::from(v) ),
+          split: ($split).map(|v: &str| From::from(v) ),
+          action: Some($fn_name as util::ToolArgActionFn<$ty>),
+        }
+      };
+    }
+
+    fn $fn_name($this: &mut $ty, $single: bool, $cap: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body
+    }
+  };
+  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr }) => {
+    lazy_static! {
+      pub static ref $name: ::util::ToolArg<$ty> = {
+        ::util::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: ($single_regex).map(|v: &str| From::from(v) ),
+          split: ($split).map(|v: &str| From::from(v) ),
+          action: None,
+        }
+      };
+    }
+  }
+);
+
+#[macro_export] macro_rules! argument(
+  (impl $name:ident where { Some($single:expr), None } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => (
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split:  None,
+
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  );
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: None,
+          split: Some(From::from($split)),
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty {
+    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
+  }) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
+
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+    #[allow(unreachable_code)]
+    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
+      ::std::result::Result<(), Box<Error>>
+    {
+      $fn_body;
+      Ok(())
+    }
+  };
+
+
+
+  (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: None,
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+  };
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: None,
+          split: Some(From::from($split)),
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
+
+          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
+        }
+      };
+    }
+  };
+
+
+  (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: None,
+          action: None,
+        }
+      };
+    }
+  };
+  (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: None,
+          split: Some(From::from($split)),
+          action: None,
+        }
+      };
+    }
+  };
+  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
+    lazy_static! {
+      pub static ref $name: $crate::ToolArg<$this> = {
+        $crate::ToolArg {
+          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
+          single: Some(From::from($single)),
+          split: Some(From::from($split)),
+          action: None,
+        }
+      };
+    }
+  };
+);
+
 
 pub mod filetype;
 pub mod ldtools;
@@ -93,7 +472,7 @@ pub fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
     assert!(bin.as_ref().is_relative());
     bin.as_ref().to_path_buf()
 }
-#[cfg(all(target_os = "nacl", not(test)))]
+ #[cfg(all(target_os = "nacl", not(test)))]
 pub fn get_bin_path<T: AsRef<Path>>(bin: T) -> PathBuf {
   use std::env::consts::EXE_SUFFIX;
   assert!(bin.as_ref().is_relative());
@@ -249,7 +628,7 @@ impl Arch {
     } else {
       check_triple_format(split.next(), triple.as_ref())?
     };
-    let format = if split.peek().is_some() {
+    let _format = if split.peek().is_some() {
       Some(check_triple_format(split.next(), triple.as_ref())?)
     } else {
       None
@@ -513,6 +892,11 @@ impl<'a, This> From<&'a ToolArg<This>> for InitedToolArg<This>
   }
 }
 
+pub trait ToolArgAccessor<This, TArg> {
+  //fn name_modifier() -> Option<Cow<'static, str>> { None }
+  fn access<'a>(this: &'a mut This) -> &'a mut TArg;
+}
+
 impl<This> fmt::Debug for ToolArg<This>
   where This: ?Sized,
 {
@@ -617,332 +1001,7 @@ impl<This> InitedToolArg<This>
 }
 
 // This is an array of arrays so multiple global arg arrays can be glued together.
-pub type ToolArgs<This> = Vec<ToolArg<This>>;
-
-#[macro_export] macro_rules! tool_arguments {
-  ($ty:ty => [ $( $arg:expr, )* ]) => ({
-    return Some(vec![
-      $(
-        ($arg).clone()
-      ),*
-    ]);
-  });
-}
-
-#[macro_export] macro_rules! expand_style (
-  (single_and_split_simple_path($path_name:ident) => $single:ident, $cap:ident) => {
-    let path = if !$single {
-      $cap.get(0)
-        .unwrap()
-        .as_str()
-    } else {
-      $cap.get(1)
-        .unwrap()
-        .as_str()
-    };
-    let $path_name = ::std::path::Path::new(path);
-  };
-  (single_and_split_int($ity:ident, $out_name:ident) => $single:ident, $cap:ident) => {
-    let str = if !$single {
-      $cap.get(0)
-        .unwrap()
-        .as_str()
-    } else {
-      $cap.get(1)
-        .unwrap()
-        .as_str()
-    };
-    let $out_name = $ity::from_str_radix(str, 10)?;
-  };
-  (simple_able_boolean($boolean_name:ident) => $single:ident, $cap:ident) => {
-    let sw = $cap.get(1).unwrap().as_str();
-    let $boolean_name = match sw {
-      "enable" => true,
-      "disable" => false,
-      _ => unreachable!(),
-    };
-  };
-  (simple_no_flag($boolean_name:ident) => $single:ident, $cap:ident) => {
-    let $boolean_name = match $cap.get(1) {
-      Some(v) if v.as_str() == "no-" => false,
-      _ => true,
-    };
-  };
-  (single_and_split_from_str($out_name:ident) => $single:ident, $cap:ident) => {
-    let str = if !$single {
-      $cap.get(0)
-        .unwrap()
-        .as_str()
-    } else {
-      $cap.get(1)
-        .unwrap()
-        .as_str()
-    };
-    let $out_name = ::std::str::FromStr::from_str(str)?;
-  };
-);
-
-#[macro_export] macro_rules! expand_style_single (
-  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
-  };
-  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=([0-9]*)$")))
-  };
-  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--(enable|disable)-",
-                                              $param, "$")))
-  };
-  (simple_no_flag($boolean_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--(no-)?",
-                                              $param, "$")))
-  };
-  (single_and_split_from_str($out:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"=(.*)$")))
-  };
-);
-#[macro_export] macro_rules! expand_style_split (
-  (single_and_split_simple_path($path_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
-  };
-  (single_and_split_int($ity:ident, $int_name:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
-  };
-  (simple_able_boolean($boolean_name:ident) => $param:expr) => {
-    None
-  };
-  (simple_no_flag($boolean_name:ident) => $param:expr) => {
-    None
-  };
-  (single_and_split_from_str($out:ident) => $param:expr) => {
-    Some(::std::borrow::Cow::Borrowed(concat!("^--",$param,"$")))
-  };
-);
-
-/// TODO create a proc macro to handle the explosion of options
-#[macro_export] macro_rules! tool_argument(
-    (pub $name:ident: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
-     fn $fn_name:ident($this_name:ident) $fn_body:block) =>
-  {
-    #[allow(non_snake_case)]
-    pub const $name: $crate::ToolArg<$ty> = $crate::ToolArg {
-      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-      single: expand_style_single!($style($($style_args),*) => $param_name),
-      split:  expand_style_split!($style($($style_args),*) => $param_name),
-      action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
-        $fn_name(this, single, cap)
-      }),
-    };
-    #[allow(unused_variables)]
-    fn $fn_name($this_name: &mut $ty, single: bool, cap: $crate::regex::Captures)
-                -> ::std::result::Result<(), Box<::std::error::Error>>
-    {
-      expand_style!($style($($style_args),*) => single, cap);
-      Ok($fn_body)
-    }
-  };
-  (pub $name:ident<$first_ty:ident $(,$tys:ident)*>: $ty:ty = $style:ident($($style_args:ident),*) $param_name:expr =>
-   fn $fn_name:ident($this_name:ident)
-   where $($where_tys:path : $where_clauses:path,)+
-   $fn_body:block) =>
-  {
-    #[allow(non_snake_case)]
-    let $name: $crate::ToolArg<$ty> = $crate::ToolArg {
-      name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-      single: expand_style_single!($style($($style_args),*) => $param_name),
-      split:  expand_style_split!($style($($style_args),*) => $param_name),
-action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
-        $fn_name(this, single, cap)
-      }),
-    };
-    #[allow(unused_variables)]
-    fn $fn_name<$first_ty $(,$tys)*>($this_name: &mut $first_ty, single: bool, cap: $crate::regex::Captures)
-                                     -> ::std::result::Result<(), Box<::std::error::Error>>
-      where $($where_tys : $where_clauses,)+
-    {
-      expand_style!($style($($style_args),*) => single, cap);
-      Ok($fn_body)
-    }
-  };
-
-  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr };
-   fn $fn_name:ident($this:ident, $single:ident, $cap:ident) $fn_body:block) => {
-    lazy_static! {
-      pub static ref $name: ::util::ToolArg<$ty> = {
-        ::util::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: ($single_regex).map(|v: &str| From::from(v) ),
-          split: ($split).map(|v: &str| From::from(v) ),
-          action: Some($fn_name as util::ToolArgActionFn<$ty>),
-        }
-      };
-    }
-
-    fn $fn_name($this: &mut $ty, $single: bool, $cap: $crate::regex::Captures) ->
-      ::std::result::Result<(), Box<Error>>
-    {
-      $fn_body
-    }
-  };
-  ($name:ident: $ty:ty = { $single_regex:expr, $split:expr }) => {
-    lazy_static! {
-      pub static ref $name: ::util::ToolArg<$ty> = {
-        ::util::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: ($single_regex).map(|v: &str| From::from(v) ),
-          split: ($split).map(|v: &str| From::from(v) ),
-          action: None,
-        }
-      };
-    }
-  }
-);
-
-#[macro_export] macro_rules! argument(
-  (impl $name:ident where { Some($single:expr), None } for $this:ty {
-    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-  }) => (
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split:  None,
-
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-    #[allow(unreachable_code)]
-    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
-      ::std::result::Result<(), Box<Error>>
-    {
-      $fn_body;
-      Ok(())
-    }
-  );
-  (impl $name:ident where { None, Some($split:expr) } for $this:ty {
-    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-  }) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: None,
-          split: Some(From::from($split)),
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-    #[allow(unreachable_code)]
-    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
-      ::std::result::Result<(), Box<Error>>
-    {
-      $fn_body;
-      Ok(())
-    }
-  };
-  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty {
-    fn $fn_name:ident($this_name:ident, $single_name:ident, $cap_name:ident) $fn_body:block
-  }) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split: Some(From::from($split)),
-
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-    #[allow(unreachable_code)]
-    fn $fn_name($this_name: &mut $this, $single_name: bool, $cap_name: $crate::regex::Captures) ->
-      ::std::result::Result<(), Box<Error>>
-    {
-      $fn_body;
-      Ok(())
-    }
-  };
-
-
-
-  (impl $name:ident where { Some($single:expr), None } for $this:ty => Some($fn_name:ident)) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split: None,
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-  };
-  (impl $name:ident where { None, Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: None,
-          split: Some(From::from($split)),
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-  };
-  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => Some($fn_name:ident)) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split: Some(From::from($split)),
-
-          action: Some($fn_name as $crate::ToolArgActionFn<$this>),
-        }
-      };
-    }
-  };
-
-
-  (impl $name:ident where { Some($single:expr), None } for $this:ty => None) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split: None,
-          action: None,
-        }
-      };
-    }
-  };
-  (impl $name:ident where { None, Some($split:expr) } for $this:ty => None) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: None,
-          split: Some(From::from($split)),
-          action: None,
-        }
-      };
-    }
-  };
-  (impl $name:ident where { Some($single:expr), Some($split:expr) } for $this:ty => None) => {
-    lazy_static! {
-      pub static ref $name: $crate::ToolArg<$this> = {
-        $crate::ToolArg {
-          name: ::std::borrow::Cow::Borrowed(stringify!($name)),
-          single: Some(From::from($single)),
-          split: Some(From::from($split)),
-          action: None,
-        }
-      };
-    }
-  };
-);
+pub type ToolArgs<This> = Cow<'static, [ToolArg<This>]>;
 
 pub trait Tool: fmt::Debug {
   fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>>
@@ -992,7 +1051,7 @@ pub fn process_invocation_args<T>(invocation: &mut T,
     let next_args = next_args.unwrap();
     let next_args: Vec<InitedToolArg<_>> = next_args
       .into_iter()
-      .map(|v| (&v).into() )
+      .map(|v| v.into() )
       .collect();
 
     //println!("iteration `{}`", iteration);

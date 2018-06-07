@@ -88,5 +88,7 @@ pub fn build(invoc: &Invocation,
              &mut queue)?;
   }
 
-  link(invoc, queue, &[], "libcompiler-rt.so")
+  link(invoc, queue, &[], "libcompiler-rt")?;
+
+  Ok(())
 }

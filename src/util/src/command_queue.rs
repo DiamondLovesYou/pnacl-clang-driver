@@ -204,7 +204,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
         println!("command failed!");
         return Err(CommandQueueError::ProcessError(result.code()));
       }
-    } else if !state.is_last || state.final_output.is_none() {
+    } else {
       if self.prev_outputs {
         for prev in state.prev_outputs.drain(..) {
           self.cmd.0.arg(prev);
@@ -218,8 +218,6 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
         println!("command failed!");
         return Err(CommandQueueError::ProcessError(result.code()));
       }
-    } else {
-      panic!("internal error: last command in queue doesn't have a output param");
     }
 
     self.copy_output_to(out)?;

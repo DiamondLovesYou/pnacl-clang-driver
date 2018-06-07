@@ -1,5 +1,5 @@
-use super::{Invocation, link};
-use util::CommandQueue;
+use super::{Invocation, link, get_system_dir};
+use util::{CommandQueue, get_crate_root};
 
 use clang_driver;
 
@@ -78,7 +78,7 @@ const FILE_BLACKLIST: &'static [Blacklisted] = &[
   Blacklisted::ModuleFile("passwd", "getgrouplist.c"),
 ];
 const FILE_WHITELIST: &'static [&'static str] = &[
-  "thread/wasm_pthread_stubs.c",
+  //"thread/wasm_pthread_stubs.c",
 
   "ldso/dlopen.c", "ldso/dlerror.c", "ldso/dlclose.c",
   "ldso/dladdr.c", "ldso/dlsym.c",
@@ -156,6 +156,11 @@ impl State {
   }
 }
 
+fn get_musl_root() -> PathBuf {
+  get_system_dir()
+    .join("musl")
+}
+
 pub fn build_c(invoc: &Invocation,
                file: &PathBuf,
                queue: &mut &mut CommandQueue<Invocation>)
@@ -166,12 +171,12 @@ pub fn build_c(invoc: &Invocation,
   args.push("-c".to_string());
   args.push(format!("{}", file.display()));
 
-  let idir = invoc.tc.emscripten
-    .join(SRC_DIR)
+  let idir = get_musl_root()
+    .join("src")
     .join("internal");
   args.push(format!("-I{}", idir.display()));
-  let idir = invoc.tc.emscripten
-    .join("system/lib/libc/musl/arch/emscripten");
+  let idir = get_musl_root()
+    .join("arch/wasm32");
   args.push(format!("-I{}", idir.display()));
 
   let out_file = format!("{}.obj", file.file_name().unwrap().to_str().unwrap());
@@ -190,29 +195,52 @@ pub fn build_c(invoc: &Invocation,
   cmd.intermediate_name = Some(out_file);
 }
 
-pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue<Invocation>)
-  -> Result<(), Box<Error>>
-{
-  let src_dir = invoc.tc.emscripten
-    .join(SRC_DIR);
+impl Invocation {
+  pub fn build_musl(&self, mut queue: &mut CommandQueue<Invocation>)
+    -> Result<(), Box<Error>>
+  {
+    use std::fs::File;
+    use std::io::Write;
+    use std::process::Command;
 
-  let mut state = State::default();
+    use tempdir::TempDir;
 
-  for &file in FILE_WHITELIST.iter() {
-    let file = src_dir.join(file)
-      .to_path_buf();
-    state.files.push(file);
+    // configure arch/wasm32/bits/*.in
+
+    let clang = self.tc.llvm_tool("clang");
+    let lld   = self.tc.llvm_tool("wasm-ld");
+
+    let prefix = self.tc.sysroot_cache();
+    let lib_dir = prefix.join("lib");
+
+    let config = format!(r#"
+CROSS_COMPILE=llvm-
+CC={}
+CFLAGS=-target wasm32-unknown-unknown-wasm
+LDFLAGS=-fuse-ld={} -Wl,--relocatable,--import-memory,--import-table -L{}
+
+prefix={}
+includedir=$(prefix)/include
+libdir=$(prefix)/lib
+syslibdir=$(prefix)/lib
+
+LIBCC=-lcompiler-rt
+ARCH=wasm32
+"#,
+                         clang.display(), lld.display(),
+                         lib_dir.display(), prefix.display());
+
+    let config_mak = get_musl_root()
+      .join("config.mak");
+    let mut config_mak = File::create(config_mak)?;
+    config_mak.write_all(config.as_ref())?;
+
+    let mut cmd = Command::new("make");
+    cmd.current_dir(get_musl_root())
+      .arg("install");
+    queue.enqueue_external(None, cmd, None,
+                           false, None::<Vec<TempDir>>);
+
+    Ok(())
   }
-
-  state.visit_dir(&src_dir)?;
-
-  for file in state.files.iter() {
-    build_c(invoc, file, &mut queue);
-  }
-  super::libdlmalloc::build(invoc, queue)?;
-
-  link(invoc, queue,
-       &["compiler-rt"],
-       "libc.so")
 }

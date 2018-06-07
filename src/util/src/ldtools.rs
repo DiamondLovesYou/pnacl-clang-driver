@@ -182,14 +182,6 @@ pub fn expand_input(input: Input, search: &[PathBuf],
     Input::Library(is_absolute, path, allowed_types) => {
       let chain = if is_absolute {
         find_file(&path, search, allowed_types)
-          .or_else(|| {
-            if path == Path::new("libpnacl_irt_shim.a") {
-              find_file("libpnacl_irt_shim_dummy.a", search,
-                        allowed_types)
-            } else {
-              None
-            }
-          })
       } else {
         find_file(format!("lib{}.so", path.display()),
                   search, allowed_types)
@@ -198,17 +190,6 @@ pub fn expand_input(input: Input, search: &[PathBuf],
                       allowed_types)
           })
       };
-
-      let chain = chain
-        .or_else(|| {
-          if path == Path::new("pthread") {
-            find_file("libpthread_private.so", search, allowed_types)
-              .or_else(|| find_file("libpthread_private.a", search, allowed_types) )
-
-          } else {
-            None
-          }
-        });
 
       match chain {
         Some(p) => {

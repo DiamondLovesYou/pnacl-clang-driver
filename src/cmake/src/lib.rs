@@ -1,6 +1,10 @@
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+
+use std::borrow::Cow;
+use std::fmt;
 
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue};
 use util::toolchain::WasmToolchain;
@@ -22,16 +26,99 @@ fn get_cmake_modules_dir() -> PathBuf {
 pub struct Invocation {
   tc: WasmToolchain,
   args: Vec<String>,
+
+  pub defines: HashMap<String, Var>,
+
   pub output_dir: PathBuf,
 }
 
 impl Invocation {
+  fn cmake_args_mut(&mut self) -> &mut HashMap<String, Var> {
+    &mut self.defines
+  }
+  pub fn cmake_bool<T>(&mut self, key: T, value: bool) -> &mut Self
+    where T: Into<String>,
+  {
+    self.cmake_args_mut().insert(key.into(), Var::Bool(value));
+    self
+  }
+  pub fn cmake_on<T>(&mut self, key: T) -> &mut Self
+    where T: Into<String>,
+  {
+    self.cmake_bool(key, true)
+  }
+  pub fn cmake_off<T>(&mut self, key: T) -> &mut Self
+    where T: Into<String>,
+  {
+    self.cmake_bool(key, false)
+  }
+
+  pub fn cmake_str<T, U>(&mut self, key: T, str: U) -> &mut Self
+    where T: Into<String>,
+          U: Into<String>,
+  {
+    self.cmake_args_mut().insert(key.into(),
+                                 Var::str(str.into()));
+    self
+  }
+
+  pub fn cmake_file<T, U>(&mut self, key: T, path: U) -> &mut Self
+    where T: Into<String>,
+          U: Into<PathBuf>,
+  {
+    self.cmake_args_mut().insert(key.into(),
+                                 Var::File(path.into()));
+    self
+  }
+
+  pub fn cmake_path<T, U>(&mut self, key: T, path: U) -> &mut Self
+    where T: Into<String>,
+          U: Into<PathBuf>,
+  {
+    self.cmake_args_mut().insert(key.into(),
+                                 Var::Path(path.into()));
+    self
+  }
+
+  pub fn append_str<T, U>(&mut self, key: T, value: U)
+    where T: Into<String>,
+          U: AsRef<str>,
+  {
+    use std::collections::hash_map::Entry;
+    match self.defines.entry(key.into()) {
+      Entry::Occupied(mut o) => {
+        let mut str = o.get_mut().force_as_str_mut();
+        str.push_str(" ");
+        str.push_str(value.as_ref());
+      },
+      Entry::Vacant( v) => {
+        v.insert(Var::String(value.as_ref().to_string().into()));
+      },
+    }
+  }
+
+  pub fn c_cxx_flag<U>(&mut self, value: U) -> &mut Self
+    where U: AsRef<str>,
+  {
+    self.append_str("CMAKE_C_FLAGS", value.as_ref());
+    self.append_str("CMAKE_CXX_FLAGS", value);
+    self
+  }
+
+  pub fn generator<K>(&mut self, gen: K) -> &mut Self
+    where K: Into<String>,
+  {
+    self.args.push("-G".into());
+    self.args.push(gen.into());
+    self
+  }
 }
 impl Default for Invocation {
   fn default() -> Self {
     Invocation {
       tc: Default::default(),
       args: vec![],
+      defines: Default::default(),
       output_dir: std::env::current_dir()
         .expect("current_dir failed?"),
     }
@@ -58,6 +145,11 @@ impl Tool for Invocation {
     cmd.arg("-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON");
     cmd.env("WASM_TC_CMAKE_MODULE_PATH", toolchain_file);
 
+    for (key, value) in self.defines.iter() {
+      let arg = Display(key, value);
+      cmd.arg(format!("{}", arg));
+    }
+
     queue.enqueue_external(Some("cmake"), cmd,
                            None, false, None::<Vec<TempDir>>);
 
@@ -78,8 +170,8 @@ impl Tool for Invocation {
     None
   }
   /// Unconditionally set the output file.
-  fn override_output(&mut self, _out: PathBuf) {
-    panic!();
+  fn override_output(&mut self, out: PathBuf) {
+    self.output_dir = out;
   }
 }
 
@@ -109,3 +201,88 @@ argument!(impl ARGS where { Some(r"^(.*)$"), None } for Invocation {
       this.args.push(arg.to_string());
     }
 });
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Var {
+  String(Cow<'static, str>),
+  File(PathBuf),
+  Path(PathBuf),
+  Bool(bool),
+}
+
+impl Var {
+  pub fn static_str(s: &'static str) -> Var {
+    Var::String(Cow::Borrowed(s))
+  }
+  pub fn str(s: String) -> Var {
+    Var::String(Cow::Owned(s))
+  }
+  pub fn file<T>(f: T) -> Var
+    where T: Into<PathBuf>,
+  {
+    Var::File(f.into())
+  }
+  pub fn path<T>(f: T) -> Var
+    where T: Into<PathBuf>,
+  {
+    Var::Path(f.into())
+  }
+
+  pub fn as_str(&self) -> Option<&str> {
+    match self {
+      &Var::String(ref str) => Some(str.as_ref()),
+      _ => None,
+    }
+  }
+  pub fn as_str_mut(&mut self) -> Option<&mut String> {
+    match self {
+      &mut Var::String(ref mut str) => Some(str.to_mut()),
+      _ => None,
+    }
+  }
+  pub fn force_as_str_mut(&mut self) -> &mut String {
+    if self.as_str_mut().is_none() {
+      *self = Var::String("".into());
+    }
+
+    self.as_str_mut().unwrap()
+  }
+
+  pub fn type_str(&self) -> &'static str {
+    match self {
+      &Var::String(..) => "STRING",
+      &Var::File(..) => "FILEPATH",
+      &Var::Path(..) => "PATH",
+      &Var::Bool(..) => "BOOL",
+    }
+  }
+}
+
+impl From<bool> for Var {
+  fn from(v: bool) -> Var {
+    Var::Bool(v)
+  }
+}
+
+pub struct Display<'a>(&'a String, &'a Var);
+impl<'a> fmt::Display for Display<'a> {
+  fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+    write!(fmt, "-D{}:{}=", self.0,
+           self.1.type_str())?;
+    match self.1 {
+      &Var::String(ref s) => fmt.pad(s.as_ref()),
+      &Var::File(ref f) |
+      &Var::Path(ref f) => write!(fmt, "{}", f.display()),
+      &Var::Bool(true) => fmt.pad("ON"),
+      &Var::Bool(false) => fmt.pad("OFF"),
+    }
+  }
+}
+pub trait ArgDisplay {
+  fn display(&self) -> Display;
+}
+impl<'a> ArgDisplay for (&'a String, &'a Var) {
+  fn display(&self) -> Display {
+    Display(self.0, self.1)
+  }
+}

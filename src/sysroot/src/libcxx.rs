@@ -1,94 +1,87 @@
 
 use super::{Invocation, link};
-use util::{CommandQueue};
+use util::{CommandQueue, ToolInvocation, ToolArgs, CreateIfNotExists, Tool};
 
 use clang_driver;
+use cmake_driver;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-const FILES: &'static [&'static str] = &[
-  "algorithm.cpp",
-  "any.cpp",
-  "bind.cpp",
-  "chrono.cpp",
-  "condition_variable.cpp",
-  "debug.cpp",
-  "exception.cpp",
-  "future.cpp",
-  "hash.cpp",
-  "ios.cpp",
-  "iostream.cpp",
-  "locale.cpp",
-  "memory.cpp",
-  "mutex.cpp",
-  "new.cpp",
-  "optional.cpp",
-  "random.cpp",
-  "regex.cpp",
-  "shared_mutex.cpp",
-  "stdexcept.cpp",
-  "string.cpp",
-  "strstream.cpp",
-  "system_error.cpp",
-  "thread.cpp",
-  "typeinfo.cpp",
-  "utility.cpp",
-  "valarray.cpp",
-  "variant.cpp",
-];
-
-pub fn build_cxx(invoc: &Invocation,
-                 libcxxabi_include: &PathBuf,
-                 file: &'static str,
-                 queue: &mut &mut CommandQueue<Invocation>)
-{
-  let full_file = invoc.tc.emscripten
-    .join("system/lib/libcxx")
-    .join(file);
-
-  let mut clang = clang_driver::Invocation::default();
-  clang.driver_mode = clang_driver::DriverMode::CXX;
-  let mut args = Vec::new();
-  args.push("-c".to_string());
-  args.push(format!("{}", full_file.display()));
-
-  let out_file = format!("{}.obj", file);
-  let out_file = Path::new(&out_file).to_path_buf();
-
-  args.push("-DLIBCXX_BUILDING_LIBCXXABI=1".to_string());
-  args.push("-D_LIBCPP_BUILDING_LIBRARY".to_string());
-  args.push("-Oz".to_string());
-  args.push(format!("-I{}", libcxxabi_include.display()));
-  args.push("-std=c++11".to_string());
-  args.push("-D_LIBCPP_ABI_VERSION=2".to_string());
-  super::add_default_args(&mut args);
-
-  let cmd = queue
-    .enqueue_tool(Some("clang++"),
-                  clang, args, false,
-                  None::<Vec<::tempdir::TempDir>>)
-    .expect("internal error: bad clang arguments");
-  cmd.prev_outputs = false;
-  cmd.output_override = true;
-  cmd.intermediate_name = Some(out_file);
-}
-
-pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
-  let libcxxabi_include = invoc.tc.emscripten
-    .join("system/lib/libcxxabi/include")
-    .to_path_buf();
-
-  for file in FILES.iter() {
-    build_cxx(invoc,
-              &libcxxabi_include,
-              file,
-              &mut queue);
+impl Invocation {
+  pub fn libcxx_src(&self) -> PathBuf {
+    super::get_system_dir()
+      .join("libcxx")
   }
+  pub fn build_libcxx(&self, mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
+    use std::process::Command;
+    use tempdir::TempDir;
 
-  link(invoc, queue,
-       &["c", "cxxabi"],
-       "libcxx.so")
+    if self.clobber_libcxx_build {
+      let f = move |sess: &mut &mut Invocation| {
+        let libcxx_build = super::get_system_dir()
+          .join("libcxx-build");
+        ::std::fs::remove_dir_all(&libcxx_build)?;
+        libcxx_build.create_if_not_exists()?;
 
+        Ok(())
+      };
+      queue.enqueue_function(Some("clobber-libcxx-build"), f);
+    }
+
+    let libcxx = self.libcxx_src();
+    let libcxxabi = self.libcxxabi_src();
+
+    let libcxx_build = super::get_system_dir()
+      .join("libcxx-build")
+      .create_if_not_exists()?;
+
+    let sysroot = self.tc.sysroot_cache();
+
+    let mut cmake = cmake_driver::Invocation::default();
+    cmake.override_output(libcxx_build.clone());
+    cmake
+      .cmake_on("LIBCXX_USE_COMPILER_RT")
+      .cmake_on("LIBCXX_HAS_MUSL_LIBC")
+      .cmake_on("LIBCXX_ENABLE_STATIC")
+      .cmake_on("LIBCXX_ENABLE_SHARED")
+      .cmake_on("LIBCXX_ENABLE_THREADS")
+      .cmake_on("LIBCXX_INSTALL_SUPPORT_HEADERS")
+      .cmake_off("LIBCXX_ENABLE_WERROR")
+      // cmake removes the trailing slash if it is a path type,
+      // which is important for this var.
+      .cmake_str("LIBCXX_INSTALL_PREFIX",
+                 format!("{}/", sysroot.display()))
+      .cmake_str("LIBCXX_TARGET_TRIPLE", "wasm32-unknown-unknown-wasm")
+      .cmake_str("LIBCXX_CXX_ABI", "libcxxabi")
+      .cmake_path("LIBCXX_SYSROOT", &sysroot)
+      .cmake_path("LIBCXX_CXX_ABI_LIBRARY_PATH",
+                  sysroot.join("lib"))
+      .cmake_path("LIBCXX_LIBRARY_DIR",
+                  sysroot.join("lib"))
+      .cmake_path("LLVM_PATH", self.llvm_src())
+      .c_cxx_flag("-nodefaultlibs")
+      .c_cxx_flag("-lc")
+      .c_cxx_flag("-Wl,--relocatable,--import-table,--import-memory")
+      .c_cxx_flag(format!("-I{}", self.libcxxabi_src().join("include").display()))
+      .c_cxx_flag(format!("-I{}", libcxx.join("include/support/musl").display()))
+      .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
+      .generator("Ninja");
+
+    {
+      let cmd = queue.enqueue_tool(None, cmake,
+                                   vec![format!("{}", libcxx.display()), ],
+                                   false, None::<Vec<TempDir>>)?;
+      cmd.prev_outputs = false;
+      cmd.output_override = false;
+    }
+
+    let mut cmd = Command::new("ninja");
+    cmd.current_dir(libcxx_build)
+      .arg("install");
+
+    queue.enqueue_external(None, cmd, None,
+                           false, None::<Vec<TempDir>>);
+    Ok(())
+  }
 }

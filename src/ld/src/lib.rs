@@ -1,13 +1,11 @@
 
 use std::error::Error;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use util::{Arch, CommandQueue};
 
 pub use util::ldtools::{Input, AllowedTypes};
 use util::toolchain::WasmToolchain;
-use util::OptimizationGoal;
 
 extern crate regex;
 #[macro_use] extern crate util;
@@ -30,8 +28,6 @@ pub struct Invocation {
 
   static_input: bool,
 
-  // build a shared object
-  pub shared: bool,
   pub emit_llvm: bool,
   pub emit_asm: bool,
   pub emit_wast: bool,
@@ -40,7 +36,7 @@ pub struct Invocation {
   pub s2wasm_libname: Option<String>,
   pub s2wasm_needed_libs: Vec<String>,
 
-  pub optimize: util::OptimizationGoal,
+  pub optimize: Option<util::OptimizationGoal>,
   pub lto: bool,
   pub strip: util::StripMode,
 
@@ -56,6 +52,11 @@ pub struct Invocation {
   has_bitcode_inputs: bool,
 
   output: Option<PathBuf>,
+
+  entry: Option<String>,
+  global_base: Option<usize>,
+  pub import_memory: bool,
+  pub import_table: bool,
 
   pub search_paths: Vec<PathBuf>,
 
@@ -86,7 +87,6 @@ impl Default for Invocation {
 
       static_input: false,
 
-      shared: false,
       emit_llvm: false,
       emit_asm: false,
       emit_wast: false,
@@ -111,6 +111,11 @@ impl Default for Invocation {
       has_bitcode_inputs: false,
 
       output: Default::default(),
+
+      entry: None,
+      global_base: None,
+      import_memory: false,
+      import_table: false,
 
       search_paths: Default::default(),
 
@@ -218,22 +223,28 @@ impl Invocation {
     }
   }
 
-  pub fn get_llc_optimization_goal(&self) -> util::OptimizationGoal {
-    match self.optimize {
-      OptimizationGoal::Balanced |
-      OptimizationGoal::Size => OptimizationGoal::Speed(2),
-      _ => self.optimize,
-    }
+  pub fn add_search_path<T>(&mut self, p: T)
+    where T: Into<PathBuf>,
+  {
+    self.search_paths.push(p.into());
+  }
+
+  pub fn add_library<T>(&mut self, p: T, abs: bool)
+    -> Result<(), Box<Error>>
+    where T: Into<PathBuf>,
+  {
+    let input = Input::Library(abs, p.into(),
+                               AllowedTypes::Any);
+    self.add_input(input)
   }
 
   /// Add a non-flag input.
   pub fn add_input(&mut self, input: Input) -> Result<(), Box<Error>> {
     use util::ldtools::*;
-    use util::filetype::{file_type, Type, Subtype};
     let expanded = expand_input(input, &self.search_paths[..], false)?;
     'outer: for input in expanded.into_iter() {
       let into = 'inner: loop {
-        let file: &PathBuf = match &input {
+        let _file: &PathBuf = match &input {
           &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
           &Input::Library(_, ref p, _) => p,
           &Input::Flag(ref _flag) => {
@@ -242,31 +253,8 @@ impl Invocation {
           &Input::File(ref path) => path,
         };
 
-        let t = file_type(file.as_path())?;
-        match t {
-          Some(Type::Object(Subtype::Bitcode)) |
-          Some(Type::Archive(Subtype::Bitcode)) => {
-            self.has_bitcode_inputs = true;
-            break 'inner &mut self.bitcode_inputs;
-          },
-          Some(Type::Wasm) => {
-            // These aren't linked, but we need
-            // to pass them to s2wasm for use in metadata.
-            let name = file.file_name().unwrap()
-              .to_str()
-              .expect("non-utf8 library name");
-            self.s2wasm_needed_libs
-              .push(name.to_string());
-            continue 'outer;
-          },
-          _ => {
-            // for debugging.
-            writeln!(std::io::stderr(),
-                     "warning: native code is never allowed: {}",
-                     file.display())?;
-            continue 'outer;
-          }
-        }
+        self.has_bitcode_inputs = true;
+        break 'inner &mut self.bitcode_inputs;
       };
 
       into.push(input);
@@ -277,7 +265,7 @@ impl Invocation {
   fn check_native_allowed(&self) -> Result<(), Box<Error>> {
     // this is a panic for debugging purposes.
     // TODO this should probably not be a panic.
-    Ok(panic!("native code is never allowed"))
+    Err("native code is never allowed".into())
   }
 
   pub fn add_native_ld_flag(&mut self, flag: &str) -> Result<(), Box<Error>> {
@@ -346,6 +334,11 @@ impl util::ToolInvocation for Invocation {
           GROUP_FLAG,
           WHOLE_ARCHIVE_FLAG,
           LINKAGE_FLAG,
+          ENTRY,
+          IMPORT_TABLE,
+          IMPORT_MEMORY,
+          GLOBAL_BASE,
+          RELOCATABLE,
           UNDEFINED,
           UNSUPPORTED,
         ]),
@@ -359,117 +352,73 @@ impl util::ToolInvocation for Invocation {
 impl util::Tool for Invocation {
   fn enqueue_commands(&mut self,
                       queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
-    use std::fs::File;
-    use std::env::home_dir;
-    use std::io::{copy, Write};
     use std::process::Command;
-    use std::rc::Rc;
 
     use tempdir::TempDir;
 
-    let mut tmpdirs = vec![];
-    let mut link_args = vec![];
+    let mut cmd = Command::new(self.tc.llvm_tool("wasm-ld"));
+    if self.relocatable {
+      cmd.arg("--relocatable");
+    }
+    cmd.args(&self.ld_flags);
+    if let Some(ref entry) = self.entry {
+      cmd.arg("--entry")
+        .arg(entry);
+    }
+    if let Some(base) = self.global_base {
+      cmd.arg(format!("--global-base={}", base));
+    }
+    if self.import_memory {
+      cmd.arg("--import-memory");
+    }
+    if self.import_table {
+      cmd.arg("--import-table");
+    }
+    match self.strip {
+      util::StripMode::None => {},
+      util::StripMode::Debug => {
+        cmd.arg("--strip-debug");
+      },
+      util::StripMode::All => {
+        cmd.arg("--strip-all");
+      },
+    }
     for input in self.bitcode_inputs.iter() {
       match input {
-        &Input::Library(_, ref path, _) => {
-          let tmp = TempDir::new("wasm-ld-archive")?;
-          let mut ar = ar::Archive::new(File::open(path)?);
-          while let Some(entry) = ar.next_entry() {
-            let mut entry = entry?;
-            let out = tmp
-              .path()
-              .join(entry.header().identifier())
-              .to_path_buf();
+        &Input::Library(_, ref p, _) => {
+          cmd.arg("-L")
+            .arg(p.parent().unwrap());
 
-            {
-              let mut out = File::create(out.as_path())?;
-              copy(&mut entry, &mut out)?;
-              out.flush()?;
-            }
-            link_args.push(out);
-          }
+          let name = p.file_name().unwrap()
+            .to_str()
+            .unwrap();
 
-          tmpdirs.push(Rc::new(tmp));
+          let s = if name.starts_with("lib") {
+            &name[3..]
+          } else {
+            &name[..]
+          };
+
+          let s = if s.ends_with(".so") {
+            &s[..s.len() - 3]
+          } else if s.ends_with(".a") {
+            &s[..s.len() - 2]
+          } else {
+            &s[..]
+          };
+
+
+          cmd.arg(format!("-l{}", s));
+          continue;
         },
-        &Input::File(ref file) => {
-          link_args.push(file.to_path_buf());
-        },
-        &Input::Flag(_) => unreachable!(),
+        _ => {},
       }
+      cmd.arg(format!("{}", input));
     }
 
-    while self.has_bitcode_inputs() {
-      // all inputs will be give in absolute path form.
-      let mut cmd = Command::new(self.tc.llvm_tool("llvm-link"));
-      cmd.args(link_args.clone());
-
-      {
-        let cmd = queue.enqueue_external(Some("link"), cmd,
-                                             Some("-o"), false,
-                                             Some(tmpdirs.clone()));
-        cmd.copy_output_to = self.get_llvm_output();
-      }
-      if !self.emit_asm && !self.emit_wast && !self.emit_wasm {
-        break;
-      }
-
-      let mut cmd = Command::new(self.tc.llvm_tool("llc"));
-      cmd.arg(format!("-march={}", self.get_arch().llvm_arch().unwrap()))
-        .arg("-filetype=asm")
-        .arg("-asm-verbose=true")
-        .arg("-thread-model=single")
-        .arg("-combiner-global-alias-analysis=false")
-        .arg(format!("{}", self.get_llc_optimization_goal()));
-
-      {
-        let cmd = queue.enqueue_external(Some("llc"), cmd,
-                                             Some("-o"), false,
-                                             None::<Vec<TempDir>>);
-        cmd.copy_output_to = self.get_asm_output();
-      }
-      if !self.emit_wast && !self.emit_wasm {
-        break;
-      }
-
-      let mut cmd = Command::new(self.tc.binaryen_tool("s2wasm"));
-      if let Some(ref libname) = self.s2wasm_libname {
-        cmd.arg(format!("--dylink-libname={}", libname));
-      } else {
-        cmd.arg("--dylink");
-      }
-      for lib in self.s2wasm_needed_libs.iter() {
-        cmd.arg("-l");
-        cmd.arg(lib);
-      }
-
-      if !self.emit_wast {
-        cmd.arg("--binary");
-      }
-
-      let out_arg = if self.emit_wast && self.emit_wasm {
-        cmd.arg("-o");
-        cmd.arg(self.get_wast_output().unwrap());
-        None
-      } else {
-        Some("-o")
-      };
-
-      queue.enqueue_external(Some("s2wasm"), cmd,
-                             out_arg, false,
-                             None::<Vec<TempDir>>);
-
-      if self.emit_wast && self.emit_wasm {
-        self.emit_llvm = false;
-        self.emit_asm = false;
-        self.emit_wast = false;
-        continue; // XXX This is purely because the queue
-        // always drains the prev outputs array.
-      } else {
-        break;
-      }
-    }
-
-    assert!(!self.has_native_inputs());
+    queue.enqueue_external(Some("lld"),
+                           cmd, Some("-o"),
+                           false, None::<Vec<TempDir>>);
 
     Ok(())
   }
@@ -536,27 +485,20 @@ tool_argument!(STATIC: Invocation = { Some(r"-static"), None };
                    }
                    Ok(())
                });
-/*static RELOCATABLE1: ToolArg = util::ToolArg {
-  single: Some(regex!(r"-r")),
-  split: None,
-  action: Some(set_relocatable as ToolArgActionFn),
-};
-static RELOCATABLE2: ToolArg = util::ToolArg {
-  single: Some(regex!(r"-relocatable")),
-  split: None,
-  action: Some(set_relocatable as ToolArgActionFn),
-};
-static RELOCATABLE3: ToolArg = util::ToolArg {
-  single: Some(regex!(r"-i")),
-  split: None,
-  action: Some(set_relocatable as ToolArgActionFn),
-};
-fn set_relocatable<'str>(this: &mut Invocation, _single: bool,
-                         _: regex::Captures) -> Result<(), String> {
-  this.relocatable = true;
-  this.static_ = false;
-  Ok(())
-}*/
+
+
+tool_argument! {
+  pub RELOCATABLE: Invocation = simple_no_flag(b) "relocatable" =>
+  fn relocatable_arg1(this) {
+    this.relocatable = b;
+  }
+}
+tool_argument! {
+  pub IMPORT_TABLE: Invocation = simple_no_flag(b) "import-table" =>
+  fn import_table_arg1(this) {
+    this.import_table = b;
+  }
+}
 
 tool_argument!(SEARCH_PATH: Invocation = { Some(r"^-L(.+)$"), Some(r"^-(L|-library-path)$") };
                fn add_search_path(this, single, cap) {
@@ -568,73 +510,6 @@ tool_argument!(SEARCH_PATH: Invocation = { Some(r"^-L(.+)$"), Some(r"^-(L|-libra
                });
 tool_argument!(RPATH: Invocation = { Some(r"^-rpath=(.*)$"), Some(r"^-rpath$") });
 tool_argument!(RPATH_LINK: Invocation = { Some(r"^-rpath-link=(.*)$"), Some(r"^-rpath-link$") });
-
-fn add_to_native_link_flags(this: &mut Invocation, _single: bool,
-                            cap: regex::Captures) -> Result<(), Box<Error>> {
-  this.add_native_ld_flag(cap.get(0).unwrap().as_str())
-}
-fn add_to_bc_link_flags(this: &mut Invocation, _single: bool,
-                        cap: regex::Captures) -> Result<(), Box<Error>> {
-  this.ld_flags.push(cap.get(0).unwrap().as_str().to_string());
-  Ok(())
-}
-fn add_to_both_link_flags(this: &mut Invocation, _single: bool,
-                          cap: regex::Captures) -> Result<(), Box<Error>> {
-  let flag = cap.get(0).unwrap().as_str().to_string();
-  this.ld_flags.push(flag.clone());
-  this.add_native_ld_flag(&flag[..])
-}
-
-/*static LINKER_SCRIPT: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"^(-T)$")),
-  action: Some(add_to_native_link_flags as ToolArgActionFn),
-};
-/// TODO(pdox): Allow setting an alternative _start symbol in bitcode
-static HYPHIN_E: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"^(-e)$")),
-  action: Some(add_to_both_link_flags as ToolArgActionFn),
-};
-
-/// TODO(pdox): Support GNU versioning.
-tool_argument!(VERSION_SCRIPT: Invocation = { r"^--version-script=.*$", None });
-
-static SEGMENT: ToolArg = util::ToolArg {
-  single: Some(regex!(r"^(-T(text|rodata)-segment=.*)$")),
-  split: None,
-  action: Some(add_to_native_link_flags as ToolArgActionFn),
-};
-static SECTION_START: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"^--section-start$")),
-  action: Some(section_start as ToolArgActionFn),
-};
-fn section_start(this: &mut Invocation,
-                 _single: bool,
-                 cap: regex::Captures) -> Result<(), String> {
-  try!(this.add_native_ld_flag("--section-start"));
-  this.add_native_ld_flag(cap.at(1).unwrap())
-}
-static BUILD_ID: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"^--build-id$")),
-  action: Some(build_id as ToolArgActionFn),
-};
-fn build_id<'str>(this: &mut Invocation,
-                  _single: bool,
-                  _cap: regex::Captures) -> Result<(), String> {
-  this.add_native_ld_flag("--build-id")
-}
-
-/// NOTE: -export-dynamic doesn't actually do anything to the bitcode link
-/// right now. This is just in case we do want to record that in metadata
-/// eventually, and have that influence the native linker flags.
-static EXPORT_DYNAMIC: ToolArg = util::ToolArg {
-  single: Some(regex!(r"(-export-dynamic)")),
-  split: None,
-  action: Some(add_to_bc_link_flags as ToolArgActionFn),
-};*/
 
 tool_argument!(SONAME: Invocation = { Some(r"-?-soname=(.+)"), Some(r"-?-soname") };
                fn set_soname(this, single, cap) {
@@ -649,46 +524,6 @@ tool_argument!(SONAME: Invocation = { Some(r"-?-soname=(.+)"), Some(r"-?-soname"
                    }
                    Ok(())
                });
-/*
-argument!(impl PASSTHROUGH_BC_LINK_FLAGS1 where { Some(r"(-M|--print-map|-t|--trace)"), None } for Invocation
-          => Some(add_to_bc_link_flags));
-
-static PASSTHROUGH_BC_LINK_FLAGS2: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"-y")),
-  action: Some(passthrough_bc_link_flags2 as ToolArgActionFn),
-};
-fn passthrough_bc_link_flags2<'str>(this: &mut Invocation,
-                                    _single: bool,
-                                    cap: regex::Captures) -> Result<(), String> {
-  this.ld_flags.push("-y".to_string());
-  this.ld_flags.push(cap.at(1).unwrap().to_string());
-  Ok(())
-}
-static PASSTHROUGH_BC_LINK_FLAGS3: ToolArg = util::ToolArg {
-  single: None,
-  split: Some(regex!(r"-defsym")),
-  action: Some(passthrough_bc_link_flags3 as ToolArgActionFn),
-};
-fn passthrough_bc_link_flags3<'str>(this: &mut Invocation,
-                                    _single: bool,
-                                    cap: regex::Captures) -> Result<(), String> {
-  this.ld_flags.push("-defsym".to_string());
-  this.ld_flags.push(cap.at(0).unwrap().to_string());
-  Ok(())
-}
-static PASSTHROUGH_BC_LINK_FLAGS4: ToolArg = util::ToolArg {
-  single: Some(regex!(r"^-?-wrap=(.+)$")),
-  split: Some(regex!(r"^-?-wrap$")),
-  action: Some(passthrough_bc_link_flags4 as ToolArgActionFn),
-};
-fn passthrough_bc_link_flags4<'str>(this: &mut Invocation,
-                                    _single: bool,
-                                    cap: regex::Captures) -> Result<(), String> {
-  this.ld_flags.push("-wrap".to_string());
-  this.ld_flags.push(cap.at(0).unwrap().to_string());
-  Ok(())
-}*/
 
 argument!(impl Z_FLAGS where { None, Some(r"^-z$") } for Invocation {
     fn z_flags(_this, _single, _cap) {
@@ -709,11 +544,31 @@ tool_argument!(PIC_FLAG: Invocation = { Some(r"^-fPIC$"), None };
 
 tool_argument!(OPTIMIZE_FLAG: Invocation = { Some(r"^-O([0-4sz]?)$"), None };
                fn set_optimize(this, _single, cap) {
-                   this.optimize = cap.get(1)
+                   let optimize = cap.get(1)
                        .and_then(|str| util::OptimizationGoal::parse(str.as_str()) )
                        .unwrap();
+                   this.optimize = Some(optimize);
                    Ok(())
                });
+tool_argument!(ENTRY: Invocation = { None, Some(r"^-(e|-entry)$") };
+               fn entry_arg(this, _single, cap) {
+                   this.entry = Some(cap.get(0).unwrap().as_str().to_owned());
+                   Ok(())
+               });
+
+
+tool_argument! {
+  pub IMPORT_MEMORY: Invocation = simple_no_flag(yes) "import-memory" =>
+  fn import_memory_arg(this) {
+    this.import_memory = yes;
+  }
+}
+tool_argument! {
+  pub GLOBAL_BASE: Invocation = single_and_split_int(usize, i) "global-base" =>
+  fn global_base_arg(this) {
+    this.global_base = Some(i);
+  }
+}
 
 tool_argument!(STRIP_ALL_FLAG: Invocation = { Some(r"^(-s|--strip-all)$"), None };
                fn set_strip_all(this, _single, _cap) {
@@ -757,17 +612,19 @@ argument!(impl LINKAGE_FLAG where { Some(r"^(-B(static|dynamic))$"), None } for 
 
 tool_argument!(UNDEFINED: Invocation = { Some(r"^-(-undefined=|u)(.+)$"), Some(r"^-u$") };
                fn add_undefined(_this, single, cap) {
-                   let sym = if single { cap.get(0).unwrap() }
+                   let _sym = if single { cap.get(0).unwrap() }
                              else { cap.get(1).unwrap() };
 
                    unimplemented!();
-                   Ok(())
                });
 
 
 tool_argument!(LTO_FLAG: Invocation = { Some(r"^-flto$"), None };
                fn set_lto(this, _single, _cap) {
                    this.lto = true;
+                   if this.optimize.is_none() {
+                     this.optimize = Some(util::OptimizationGoal::Size);
+                   }
                    Ok(())
                });
 

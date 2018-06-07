@@ -1,7 +1,6 @@
 
 #![allow(dead_code)]
 
-use std::borrow::ToOwned;
 use std::default::Default;
 use std::env::{self};
 use std::error::Error;
@@ -9,13 +8,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::ffi::OsString;
 
 use tempdir::TempDir;
 
 use util::{EhMode, OptimizationGoal, Tool, ToolInvocation,
            CommandQueue, ToolArgs};
 use util::{need_nacl_toolchain};
-use util::toolchain::WasmToolchain;
+use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
 #[macro_use]
 extern crate util;
@@ -184,7 +184,7 @@ impl Default for MakeDeps {
 
 #[derive(Debug, Clone)]
 pub struct Invocation {
-  tc: WasmToolchain,
+  pub tc: WasmToolchain,
   pub driver_mode: DriverMode,
   gcc_mode: Option<GccMode>,
   eh_mode: EhMode,
@@ -206,7 +206,7 @@ pub struct Invocation {
   header_inputs: Vec<PathBuf>,
 
   linker_args: Vec<String>,
-  driver_args: Vec<String>,
+  driver_args: Vec<OsString>,
 
   output: Option<PathBuf>,
 
@@ -310,27 +310,15 @@ BASIC OPTIONS:
   /// Gets the C or CXX std includes, unless self.no_default_std_inc is true
   fn get_std_inc_args(&self) -> Vec<String> {
     let mut isystem = Vec::new();
-    let system = self.tc.emscripten.join("system/include");
+    let sysroot = self.tc.sysroot();
+    let sysroot_inc = sysroot.join("include");
     if !self.no_std_inc {
-      if !self.no_std_incxx &&
-        self.driver_mode == DriverMode::CXX {
-
-        let cxx_inc = system
-          .join("libcxx")
-          .to_path_buf();
-        isystem.push(cxx_inc);
+      isystem.push(sysroot_inc.join("compat"));
+      if !self.no_std_incxx && self.driver_mode == DriverMode::CXX {
+        isystem.push(sysroot_inc.join("c++/v1"));
+        isystem.push(sysroot_inc.join("c++/v1/support/musl"));
       }
-      isystem.push(system.join("compat").to_path_buf());
-      isystem.push(system.join("libc").to_path_buf());
-      for clang_ver in ["5.0.0"].iter() {
-        let c_inc = self.tc.llvm
-          .join("lib")
-          .join("clang")
-          .join(clang_ver)
-          .join("include");
-        isystem.push(c_inc.to_path_buf());
-      }
-      isystem.push(system.to_path_buf());
+      isystem.push(sysroot_inc.clone());
     }
     isystem
       .into_iter()
@@ -341,18 +329,19 @@ BASIC OPTIONS:
   fn get_default_lib_args(&self) -> Vec<PathBuf> {
     let mut libs = Vec::new();
     libs.push(PathBuf::from("-L"));
-    libs.push(self.tc.emscripten_cache());
+    libs.push(self.tc.sysroot_lib());
     if self.no_default_libs || self.no_std_lib {
       libs
     } else {
       match self.driver_mode {
         DriverMode::CXX => {
-          libs.push(PathBuf::from("-lcxx"));
-          libs.push(PathBuf::from("-lcxxabi"));
+          libs.push(PathBuf::from("-lc++"));
+          libs.push(PathBuf::from("-lc++abi"));
         },
         _ => {}
       }
       libs.push(PathBuf::from("-lc"));
+      libs.push(PathBuf::from("-lcompiler-rt"));
       libs
     }
   }
@@ -432,7 +421,7 @@ BASIC OPTIONS:
 
   fn clang_add_std_args(&self, cmd: &mut Command) {
     cmd.args(&[
-      "-target", "wasm32-unknown-unknown",
+      "-target", "wasm32-unknown-unknown-wasm",
       "-mthread-model", "single",
     ]);
 
@@ -443,12 +432,14 @@ BASIC OPTIONS:
       "-D__EMSCRIPTEN__",
       "-Dasm=ASM_FORBIDDEN",
       "-D__asm__=ASM_FORBIDDEN",
+      "-D__wasm__",
+      "-D__wasm32__",
     ]);
     if !self.no_std_incxx && self.driver_mode == DriverMode::CXX {
-      cmd.arg("-D_LIBCPP_ABI_VERSION=2");
+      cmd.arg("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
+        .arg("-D_LIBCPP_ABI_VERSION=2");
     }
     if !self.is_pch_mode() {
-      cmd.arg("-emit-llvm");
       match self.gcc_mode {
         None => {},
         Some(GccMode::DashE) => {
@@ -583,7 +574,8 @@ BASIC OPTIONS:
 
   fn queue_ld(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     let mut ld = ld_driver::Invocation::default();
-    ld.optimize = self.optimization;
+    ld.tc = self.tc.clone();
+    ld.optimize = Some(self.optimization);
 
     let mut args = self.linker_args.clone();
     let inputs = self.inputs.iter()
@@ -595,18 +587,18 @@ BASIC OPTIONS:
       .map(|v| v.to_str().expect("non-utf8 path").to_string() );
     args.extend(i);
     args.push("-target".to_string());
-    args.push("wasm32-unknown-unknown".to_string());
+    args.push("wasm32-unknown-unknown-wasm".to_string());
     queue.enqueue_tool(Some("linker"),
                        ld, args, false,
                        None::<Vec<TempDir>>)?;
     Ok(())
   }
 
-  fn add_driver_arg<T: AsRef<str>>(&mut self, arg: T) {
-    self.driver_args.push(arg.as_ref().to_owned());
+  fn add_driver_arg<T: Into<OsString>>(&mut self, arg: T) {
+    self.driver_args.push(arg.into());
   }
   fn add_linker_arg<T: AsRef<str>>(&mut self, arg: T) {
-    self.linker_args.push(arg.as_ref().to_owned());
+    self.linker_args.push(arg.as_ref().into());
   }
   fn add_input_file<T: AsRef<Path>>(&mut self, file: T,
                                     file_lang: Option<FileLang>) {
@@ -628,6 +620,11 @@ BASIC OPTIONS:
   }
 }
 
+impl WasmToolchainTool for Invocation {
+  fn wasm_toolchain(&self) -> &WasmToolchain { &self.tc }
+  fn wasm_toolchain_mut(&mut self) -> &mut WasmToolchain { &mut self.tc }
+}
+
 impl Tool for Invocation {
   fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     if self.print_version {
@@ -635,7 +632,8 @@ impl Tool for Invocation {
       self.clang_add_std_args(&mut clang_ver);
       clang_ver.arg("-v");
       queue.enqueue_external(Some("clang"), clang_ver,
-                             None, true, None::<Vec<TempDir>>);
+                             None, true,
+                             None::<Vec<TempDir>>);
       return Ok(());
     }
 
@@ -645,8 +643,6 @@ impl Tool for Invocation {
 
     if self.should_link_output() {
       self.queue_ld(queue)?;
-
-
     }
 
     Ok(())
@@ -676,9 +672,14 @@ impl ToolInvocation for Invocation {
   fn check_state(&mut self, _iteration: usize, _skip_inputs_check: bool) -> Result<(), Box<Error>> {
     Ok(())
   }
-  fn args(&self, iteration: usize) -> Option<ToolArgs<Self>> {
+  fn args(&self, iteration: usize) -> Option<ToolArgs<Invocation>> {
+    use util::ToolArg;
+    use std::borrow::Cow;
+    const C: &'static [ToolArg<Invocation>] = &[];
+    let mut out = Cow::Borrowed(C);
+
     match iteration {
-      0 => tool_arguments!(Invocation => [
+      0 => return tool_arguments!(Invocation => [
         VERSION,
         IGNORED0,
         IGNORED1,
@@ -690,13 +691,15 @@ impl ToolInvocation for Invocation {
         IGNORED7,
         IGNORED8,
         IGNORED9,
+        STDLIB_LIBCXX,
+        RTLIB,
       ]),
-      1 => tool_arguments!(Invocation => [
+      1 => return tool_arguments!(Invocation => [
         NO_DEFAULT_LIBS,
         NO_STD_INC,
         NO_STD_INCXX,
       ]),
-      2 => tool_arguments!(Invocation => [
+      2 => return tool_arguments!(Invocation => [
         CAP_M_FLAGS,
         CAP_MM_FLAGS,
         CAP_MP_FLAGS,
@@ -704,9 +707,14 @@ impl ToolInvocation for Invocation {
         CAP_MF_FLAGS,
         CAP_MT_FLAGS,
         CAP_MQ_FLAGS,
+        SUPPRESS_WARNINGS,
       ]),
-      3 => tool_arguments!(Invocation => [
+      3 => {
+        self.tc.args(&mut out);
+      },
+      4 => return tool_arguments!(Invocation => [
         TARGET,
+        INCLUDE,
         INCLUDE_DIR,
         SYSTEM_INCLUDE,
         SYSROOT_INCLUDE,
@@ -730,10 +738,12 @@ impl ToolInvocation for Invocation {
         COMPILE, PREPROCESS,
         OUTPUT,
       ]),
-      4 => tool_arguments!(Invocation => [X_ARG, INPUTS,]),
-      5 => tool_arguments!(Invocation => [UNSUPPORTED,]),
-      _ => None,
+      5 => return tool_arguments!(Invocation => [X_ARG, INPUTS,]),
+      6 => return tool_arguments!(Invocation => [UNSUPPORTED,]),
+      _ => return None,
     }
+
+    Some(out)
   }
 }
 
@@ -810,7 +820,7 @@ argument!(impl NO_STD_INCXX where { Some(r"^-nostdinc\+\+$"), None } for Invocat
 argument!(impl TARGET where { Some(r"^--?target=(.+)$"), Some(r"^-target$") } for Invocation {
     fn target_arg(_this, single, cap) {
       let target = cap.get(if single { 1 } else { 0 }).unwrap().as_str();
-      if target != "wasm32-unknown-unknown" {
+      if target != "wasm32-unknown-unknown" && target != "wasm32-unknown-unknown-wasm" {
         Err("unknown target triple")?;
       }
     }
@@ -866,6 +876,14 @@ argument!(impl STD_VERSION where { Some(r"^-std=(.+)$"), None } for Invocation {
         .unwrap().as_str();
       this.add_driver_arg(arg);
     }
+});
+argument!(impl STDLIB_LIBCXX where { Some(r"^-stdlib=(.+)$"), None } for Invocation {
+   fn stdlib_libcxx_arg(_this, _single, cap) {
+      let v = cap.get(1).unwrap().as_str();
+      if v != "libc++" {
+        return Err("only libc++ is supported".into());
+      }
+   }
 });
 argument!(impl M_FLOAT_ABI where { Some(r"^-mfloat-abi=(.+)$"), Some(r"^-mfloat-abi$") } for Invocation {
     fn m_float_abi(this, single, cap) {
@@ -1033,6 +1051,28 @@ argument!(impl X_ARG where { Some(r"^-x(.+)$"), Some(r"^-x$") } for Invocation {
       }
     }
 });
+tool_argument! {
+  pub SUPPRESS_WARNINGS: Invocation = short_flag(b, disallowed) "w" =>
+  fn suppress_warnings_flag(this) {
+    this.add_driver_arg("-w");
+  }
+}
+tool_argument! {
+  pub RTLIB: Invocation = single_and_split_from_str(rtlib, optional_hyphen) "rtlib" =>
+  fn rtlib_arg(this) {
+    let rtlib: String = rtlib;
+    if rtlib != "compiler-rt" {
+      return Err("unsupported rtlib, must be compiler-rt".into());
+    }
+  }
+}
+tool_argument! {
+  pub INCLUDE: Invocation = single_and_split_abs_path(path, no_hyphen) "include" =>
+  fn include_file_arg(this) {
+    this.add_driver_arg("-include");
+    this.add_driver_arg(path);
+  }
+}
 tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$") };
                fn set_output(this, single, cap) {
                    if this.output.is_some() {

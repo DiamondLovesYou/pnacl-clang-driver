@@ -7,75 +7,73 @@ use cmake_driver;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-// this is, like, almost the exact same as libc++.
-
 impl Invocation {
-  pub fn libcxxabi_src(&self) -> PathBuf {
+  pub fn libunwind_src(&self) -> PathBuf {
     super::get_system_dir()
-      .join("libcxxabi")
+      .join("libunwind")
   }
-  pub fn build_libcxxabi(&self, mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
+  pub fn build_libunwind(&self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     use std::process::Command;
     use tempdir::TempDir;
 
     use cmake_driver::{Var};
 
-    if self.clobber_libcxxabi_build {
+    if self.clobber_libunwind_build {
       let f = move |sess: &mut &mut Invocation| {
-        let libcxxabi_build = super::get_system_dir()
-          .join("libcxxabi-build");
-        ::std::fs::remove_dir_all(&libcxxabi_build)?;
-        libcxxabi_build.create_if_not_exists()?;
+        let libunwind_build = super::get_system_dir()
+          .join("libunwind-build");
+        ::std::fs::remove_dir_all(&libunwind_build)?;
+        libunwind_build.create_if_not_exists()?;
 
         Ok(())
       };
-      queue.enqueue_function(Some("clobber-libcxxabi-build"), f);
+      queue.enqueue_function(Some("clobber-libunwind-build"), f);
     }
 
     let libcxx    = self.libcxx_src();
     let libcxxabi = self.libcxxabi_src();
+    let libunwind = self.libunwind_src();
 
-    let libcxxabi_build = super::get_system_dir()
-      .join("libcxxabi-build")
+    let libunwind_build = super::get_system_dir()
+      .join("libunwind-build")
       .create_if_not_exists()?;
 
     let sysroot = self.tc.sysroot_cache();
 
     let mut cmake = cmake_driver::Invocation::default();
-    cmake.override_output(libcxxabi_build.clone());
+    cmake.override_output(libunwind_build.clone());
     cmake
-      .cmake_off("LIBCXXABI_USE_LLVM_UNWINDER")
-      .cmake_on("LIBCXXABI_USE_COMPILER_RT")
+      .cmake_on("LIBUNWIND_USE_COMPILER_RT")
       .cmake_on("LLVM_ENABLE_LIBCXX")
-      .cmake_on("LIBCXXABI_ENABLE_SHARED")
-      .cmake_on("LIBCXXABI_ENABLE_THREADS")
-      .cmake_off("LIBCXXABI_ENABLE_EXCEPTIONS")
-      .cmake_str("LIBCXXABI_TARGET_TRIPLE", "wasm32-unknown-unknown-wasm")
-      .cmake_path("LIBCXXABI_SYSROOT", &sysroot)
+      .cmake_on("LIBUNWIND_ENABLE_SHARED")
+      .cmake_off("LIBUNWIND_ENABLE_ASSERTIONS")
+      .cmake_off("LIBUNWIND_ENABLE_THREADS")
+      .cmake_str("LIBUNWIND_TARGET_TRIPLE", "wasm32-unknown-unknown-wasm")
+      .cmake_path("LIBUNWIND_SYSROOT", &sysroot)
       // cmake removes the trailing slash if it is a path type,
       // which is important for this var.
-      .cmake_str("LIBCXXABI_INSTALL_PREFIX",
+      .cmake_str("LIBUNWIND_INSTALL_PREFIX",
                  format!("{}/", sysroot.display()))
       .cmake_path("LLVM_PATH", self.llvm_src())
-      .cmake_path("LIBCXXABI_LIBCXX_PATH", libcxx)
+      .cmake_path("LIBUNWIND_CXX_INCLUDE_PATHS", libcxx.join("include"))
+      .cmake_path("LLVM_CONFIG_PATH", self.tc.llvm_tool("llvm-config"))
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
       .c_cxx_flag("-Wl,--relocatable,--import-table,--import-memory")
-      .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
-      .c_cxx_flag(format!("-I{}", self.libunwind_src().join("include").display()))
+      .c_cxx_flag("-D_LIBUNWIND_DISABLE_VISIBILITY_ANNOTATIONS")
       .generator("Ninja");
 
     {
       let cmd = queue.enqueue_tool(None, cmake,
-                                   vec![format!("{}", libcxxabi.display()), ],
+                                   vec![format!("{}", libunwind.display()), ],
                                    false, None::<Vec<TempDir>>)?;
       cmd.prev_outputs = false;
       cmd.output_override = false;
     }
 
     let mut cmd = Command::new("ninja");
-    cmd.current_dir(libcxxabi_build)
-      .arg("install");
+    cmd.current_dir(libunwind_build);
+      //.arg("install");
 
     queue.enqueue_external(None, cmd, None,
                            false, None::<Vec<TempDir>>);
