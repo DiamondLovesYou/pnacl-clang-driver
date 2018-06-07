@@ -20,6 +20,17 @@ use super::{ToolInvocation, process_invocation_args,
 static STOP_BEFORE_NEXT_JOB: AtomicBool = ATOMIC_BOOL_INIT;
 static CTRL_C_HANDLER: Once = ONCE_INIT;
 
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub enum InputArgsTransformResult {
+  Normal,
+  Skip,
+}
+impl Default for InputArgsTransformResult {
+  fn default() -> Self {
+    InputArgsTransformResult::Normal
+  }
+}
+
 /// if Some(..), its value will be the argument used. The output will be
 /// written to a random temp folder && added to the next command's
 /// arguments.
@@ -33,9 +44,17 @@ impl<T> Deref for CommandTool<T> {
 impl<T> DerefMut for CommandTool<T> {
   fn deref_mut(&mut self) -> &mut T { &mut self.0 }
 }
-#[derive(Debug)]
 pub struct ExternalCommand(process::Command,
-                           Option<Cow<'static, str>>);
+                           Option<Cow<'static, str>>,
+                           Option<Box<FnBox(&mut process::Command, &[PathBuf]) -> InputArgsTransformResult>>);
+impl Debug for ExternalCommand {
+  fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+    match self.2 {
+      Some(_) => write!(fmt, "ExternalCommand({:?}, {:?}, Some(..))", self.0, self.1),
+      None => write!(fmt, "ExternalCommand({:?}, {:?}, None)", self.0, self.1),
+    }
+  }
+}
 pub struct FunctionCommand<T>(Option<Box<FnBox(&mut &mut T) -> Result<(), CommandQueueError>>>);
 impl<T> Debug for FunctionCommand<T> {
   fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
@@ -65,7 +84,7 @@ impl<T> Debug for FunctionCommandWithState<T> {
 
 #[derive(Debug)]
 pub struct ConcreteCommand {
-  pub name: Option<String>,
+  pub name: Option<Cow<'static, str>>,
   /// should we print the command we just tried to run if it exits with a non-zero status?
   pub cant_fail: bool,
   pub tmp_dirs: Vec<Rc<TempDir>>,
@@ -176,21 +195,40 @@ impl<T> ICommand<T> for Command<FunctionCommandWithState<T>>
 impl<U> ICommand<U> for Command<ExternalCommand> {
   fn run(&mut self, _: &mut &mut U,
          state: &mut RunState) -> Result<(), CommandQueueError> {
-    println!("on command: {:?} => {:?}", self.name, self.cmd);
+    let cant_fail = self.cant_fail;
 
     let out = state.output(&self.intermediate_name);
 
-    println!("output: {}", out.display());
+    if self.prev_outputs {
+      if let Some(transform) = self.cmd.2.take() {
+        let action = transform.call_box((&mut self.cmd.0, state.prev_outputs.as_ref()));
+        state.prev_outputs.clear();
+        match action {
+          InputArgsTransformResult::Skip => {
+            if let Some(copy_to) = self.copy_output_to.as_ref() {
+              state.prev_outputs.push(copy_to.clone());
+            } else {
+              // a temp dir is used otherwise, so we can't push anything to the outputs.
+            }
+            return Ok(());
+          },
+          InputArgsTransformResult::Normal => {},
+        }
 
-    let cant_fail = self.cant_fail;
+        println!("on command: {:?} => {:?}", self.name, self.cmd);
+      } else {
+        println!("on command: {:?} => {:?}", self.name, self.cmd);
 
-    if let Some(ref out_arg) = self.cmd.1 {
-      if self.prev_outputs {
         for prev in state.prev_outputs.drain(..) {
           self.cmd.0.arg(prev);
         }
       }
+    }
 
+    println!("output: {}", out.display());
+
+
+    if let Some(ref out_arg) = self.cmd.1 {
       if self.output_override {
         state.prev_outputs.push(out.clone());
         self.cmd.0.arg(&out_arg[..]);
@@ -205,12 +243,6 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
         return Err(CommandQueueError::ProcessError(result.code()));
       }
     } else {
-      if self.prev_outputs {
-        for prev in state.prev_outputs.drain(..) {
-          self.cmd.0.arg(prev);
-        }
-      }
-
       let mut child = self.cmd.0.spawn()?;
       let result = child.wait()?;
 
@@ -356,9 +388,9 @@ impl<T> CommandQueue<T>
       .stdin(Stdio::inherit());
 
     let kind =
-      ExternalCommand(cmd, output_arg.map(|v| From::from(v) ));
+      ExternalCommand(cmd, output_arg.map(|v| From::from(v) ), None);
     let concrete = ConcreteCommand {
-      name: name.map(|v| v.to_string() ),
+      name: name.map(|v| v.into() ),
       cant_fail,
       tmp_dirs: tmp_dirs
         .map(|dirs| {
@@ -367,6 +399,80 @@ impl<T> CommandQueue<T>
             .collect::<Vec<_>>()
         })
         .unwrap_or_default(),
+      intermediate_name: None,
+      prev_outputs: true,
+      output_override: true,
+      copy_output_to: None,
+    };
+    let command = Command {
+      cmd: kind,
+      concrete,
+    };
+    let command = box command;
+    let command = command as Box<ICommand<T>>;
+
+    self.queue.push(command);
+    self.queue.last_mut().unwrap().concrete()
+  }
+
+  pub fn enqueue_simple_external<U, V>(&mut self,
+                                       name: Option<U>,
+                                       mut cmd: process::Command,
+                                       output_arg: Option<V>)
+    -> &mut ConcreteCommand
+    where U: Into<Cow<'static, str>>,
+          V: Into<Cow<'static, str>>,
+  {
+    use std::process::{Stdio};
+
+    cmd.stdout(Stdio::inherit())
+      .stderr(Stdio::inherit())
+      .stdin(Stdio::inherit());
+
+    let kind = ExternalCommand(cmd, output_arg.map(|v| v.into() ), None);
+    let concrete = ConcreteCommand {
+      name: name.map(|v| v.into() ),
+      cant_fail: false,
+      tmp_dirs: Default::default(),
+      intermediate_name: None,
+      prev_outputs: true,
+      output_override: true,
+      copy_output_to: None,
+    };
+    let command = Command {
+      cmd: kind,
+      concrete,
+    };
+    let command = box command;
+    let command = command as Box<ICommand<T>>;
+
+    self.queue.push(command);
+    self.queue.last_mut().unwrap().concrete()
+  }
+
+  pub fn enqueue_external_with_input_transform<F, U, V>(&mut self,
+                                                        name: Option<U>,
+                                                        mut cmd: process::Command,
+                                                        output_arg: Option<V>,
+                                                        f: F)
+    -> &mut ConcreteCommand
+    where F: FnOnce(&mut process::Command, &[PathBuf]) -> InputArgsTransformResult + 'static,
+          U: Into<Cow<'static, str>>,
+          V: Into<Cow<'static, str>>,
+  {
+    use std::process::{Stdio};
+
+    cmd.stdout(Stdio::inherit())
+      .stderr(Stdio::inherit())
+      .stdin(Stdio::inherit());
+
+    let f = box f as Box<_>;
+
+    let kind = ExternalCommand(cmd, output_arg.map(|v| v.into() ), Some(f));
+    let concrete = ConcreteCommand {
+      name: name.map(|v| v.into() ),
+      cant_fail: false,
+      tmp_dirs: Default::default(),
       intermediate_name: None,
       prev_outputs: true,
       output_override: true,
@@ -395,7 +501,7 @@ impl<T> CommandQueue<T>
     process_invocation_args(&mut invocation, args, true)?;
 
     let concrete = ConcreteCommand {
-      name: name.map(|v| v.to_string() ),
+      name: name.map(|v| v.into() ),
       cant_fail,
       tmp_dirs: tmp_dirs
         .map(|dirs| {
@@ -424,7 +530,7 @@ impl<T> CommandQueue<T>
                                 name: Option<U>,
                                 f: F)
     -> &mut ConcreteCommand
-    where U: Into<String>,
+    where U: Into<Cow<'static, str>>,
           F: FnOnce(&mut &mut T) -> Result<(), CommandQueueError> + 'static,
   {
     let f_box = box f as Box<_>;
@@ -452,7 +558,7 @@ impl<T> CommandQueue<T>
                                       name: Option<U>,
                                       f: F)
     -> &mut ConcreteCommand
-    where U: Into<String>,
+    where U: Into<Cow<'static, str>>,
           F: FnOnce(&mut &mut T, &mut RunState) -> Result<(), CommandQueueError> + 'static,
   {
     let f_box = box f as Box<_>;
