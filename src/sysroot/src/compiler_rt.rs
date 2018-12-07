@@ -1,5 +1,5 @@
 use super::{Invocation, link};
-use util::{CommandQueue, get_crate_root};
+use util::{CommandQueue, get_crate_root, CreateIfNotExists, Tool, };
 
 use clang_driver;
 
@@ -10,25 +10,36 @@ use std::path::{Path, PathBuf};
 const BLACKLIST: &'static [&'static str] = &[
   "gcc_personality_v0.c",
   "apple_versioning.c",
+  "emutls.c",
 ];
 
-pub fn build_cc(_invoc: &Invocation,
+pub fn build_cc(invoc: &Invocation,
+                compiler_rt_prefix: &PathBuf,
+                build_out: &PathBuf,
                 full_file: &PathBuf,
                 queue: &mut &mut CommandQueue<Invocation>)
   -> Result<(), Box<Error>>
 {
-  let file = Path::new(full_file.file_name().unwrap())
-    .to_path_buf();
+  let file = Path::new(full_file.file_name().unwrap());
 
   let mut clang = clang_driver::Invocation::default();
   clang.driver_mode = clang_driver::DriverMode::CC;
+  clang.emit_wast = invoc.emit_wast;
 
   let mut args = Vec::new();
   args.push("-c".to_string());
   args.push(format!("{}", full_file.display()));
 
+  let source_path = full_file.strip_prefix(compiler_rt_prefix)
+    .expect("source not in src dir?");
+  let output = build_out.join(source_path)
+    .with_extension("o");
+  output.parent().unwrap()
+    .create_if_not_exists()?;
+  clang.override_output(output);
+
   let out_file = format!("{}.o", file.display());
-  let out_file = Path::new(&out_file).to_path_buf();
+  let out_file = Path::new(&out_file);
 
   args.push("-Oz".to_string());
   super::add_default_args(&mut args);
@@ -36,10 +47,10 @@ pub fn build_cc(_invoc: &Invocation,
   let cmd = queue
     .enqueue_tool(Some("clang"),
                   clang, args, false,
-                  None::<Vec<::tempdir::TempDir>>)?;
+                  None::<Vec<::tempdir::TempDir> >)?;
   cmd.prev_outputs = false;
-  cmd.output_override = true;
-  cmd.intermediate_name = Some(out_file);
+  cmd.output_override = false;
+  cmd.intermediate_name = Some(out_file.into());
 
   Ok(())
 }
@@ -51,6 +62,8 @@ pub fn build(invoc: &Invocation,
   use std::fs::read_dir;
   let compiler_rt_dir = get_crate_root()
     .join("system/compiler-rt");
+  let build_dir = get_crate_root()
+    .join("system/compiler-rt-build");
   let builtins_dir = compiler_rt_dir
     .join("lib/builtins");
 
@@ -58,8 +71,6 @@ pub fn build(invoc: &Invocation,
     .iter()
     .map(|&s| s )
     .collect();
-
-  println!("{}", builtins_dir.display());
 
   let mut files = vec![];
   for entry in read_dir(builtins_dir).expect("read_dir") {
@@ -84,6 +95,8 @@ pub fn build(invoc: &Invocation,
 
   for file in files.iter() {
     build_cc(invoc,
+             &compiler_rt_dir,
+             &build_dir,
              file,
              &mut queue)?;
   }

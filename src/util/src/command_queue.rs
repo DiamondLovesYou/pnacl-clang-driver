@@ -138,8 +138,6 @@ impl<T, U> ICommand<U> for Command<CommandTool<T>>
 
     let mut out = state.output(&self.intermediate_name);
 
-    println!("output: {}", out.display());
-
     if self.prev_outputs {
       for prev in state.prev_outputs.drain(..) {
         self.cmd.add_tool_input(prev)?;
@@ -155,9 +153,12 @@ impl<T, U> ICommand<U> for Command<CommandTool<T>>
         .map(|v| v.to_path_buf() );
       if let Some(o) = o.as_ref() {
         out = o.to_path_buf();
+        state.prev_outputs.push(out.clone());
       }
       CommandQueue::new(o)
     };
+
+    println!("output: {}", out.display());
 
     self.cmd.enqueue_commands(&mut queue)?;
     queue.run_all(&mut self.cmd)?;
@@ -415,13 +416,12 @@ impl<T> CommandQueue<T>
     self.queue.last_mut().unwrap().concrete()
   }
 
-  pub fn enqueue_simple_external<U, V>(&mut self,
-                                       name: Option<U>,
-                                       mut cmd: process::Command,
-                                       output_arg: Option<V>)
+  pub fn enqueue_simple_external<U>(&mut self,
+                                    name: Option<U>,
+                                    mut cmd: process::Command,
+                                    output_arg: Option<Cow<'static, str>>)
     -> &mut ConcreteCommand
     where U: Into<Cow<'static, str>>,
-          V: Into<Cow<'static, str>>,
   {
     use std::process::{Stdio};
 
@@ -429,7 +429,7 @@ impl<T> CommandQueue<T>
       .stderr(Stdio::inherit())
       .stdin(Stdio::inherit());
 
-    let kind = ExternalCommand(cmd, output_arg.map(|v| v.into() ), None);
+    let kind = ExternalCommand(cmd, output_arg, None);
     let concrete = ConcreteCommand {
       name: name.map(|v| v.into() ),
       cant_fail: false,

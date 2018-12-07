@@ -59,7 +59,7 @@ impl Invocation {
       .cmake_path("LLVM_CONFIG_PATH", self.tc.llvm_tool("llvm-config"))
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
-      .c_cxx_flag("-Wl,--relocatable,--import-table,--import-memory")
+      .c_cxx_flag(self.c_cxx_linker_args())
       .c_cxx_flag("-D_LIBUNWIND_DISABLE_VISIBILITY_ANNOTATIONS")
       .generator("Ninja");
 

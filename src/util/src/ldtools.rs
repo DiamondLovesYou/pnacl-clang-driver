@@ -28,7 +28,7 @@ pub fn parse_linker_script_file<T: AsRef<Path>>(path: T) -> Option<Vec<Input>> {
   use std::fs::File;
   use std::io::Read;
 
-  File::open(path)
+  File::open(path.as_ref())
     .ok()
     .and_then(|mut file| {
       let mut buffer = String::new();
@@ -39,21 +39,72 @@ pub fn parse_linker_script_file<T: AsRef<Path>>(path: T) -> Option<Vec<Input>> {
       }
     })
     .and_then(|buffer| {
-      parse_linker_script(buffer)
+      let dir = path.as_ref().parent().unwrap_or_else(|| ".".as_ref() );
+      parse_linker_script(buffer, dir)
     })
 }
 
-pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
+pub fn parse_linker_script<T, U>(input: T, dir: U)
+  -> Option<Vec<Input>>
+  where T: AsRef<str>,
+        U: AsRef<Path>,
+{
 
   let mut ret = Vec::new();
   let mut stack = Vec::new();
 
-  let mut iter = input.as_ref()
-    .split(|c: char| {
-      !c.is_whitespace() ||
-        c == ')' || c == '(' // force these to be separate
-    })
-    .filter(|&str| str == "" );
+  struct Tokenizer<'a>(&'a str);
+  impl<'a> Iterator for Tokenizer<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> {
+      let mut skip_whitespace = 0;
+      {
+        let mut ci = self.0.char_indices().peekable();
+        loop {
+          if let Some(&(byte, c)) = ci.peek() {
+            if c.is_whitespace() {
+              skip_whitespace = byte + c.len_utf8();
+              ci.next();
+            } else {
+              break;
+            }
+          } else {
+            return None;
+          }
+        }
+      }
+      self.0 = &self.0[skip_whitespace..];
+
+
+      let mut token_end = 0;
+      {
+        let mut ci = self.0.char_indices();
+        'outer: loop {
+          if let Some((byte, c)) = ci.next() {
+            token_end = byte;
+            if c.is_whitespace() {
+              break;
+            } else if c == '(' || c == ')' {
+              if byte == 0 {
+                token_end = 1;
+              }
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+      }
+
+      let next = &self.0[..token_end];
+      if next.len() == 0 { return None; }
+
+      self.0 = &self.0[token_end..];
+      Some(next)
+    }
+  }
+
+  let mut tokens = Tokenizer(input.as_ref());
 
   #[derive(Eq, PartialEq)]
   enum Stack {
@@ -67,7 +118,7 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
   let mut comment_mode = false;
 
   loop {
-    let curr = iter.next();
+    let curr = tokens.next();
     if curr.is_none() {
       if stack.len() != 0 {
         return None;
@@ -92,23 +143,23 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
     if stack.len() == 0 {
       if curr == "INPUT" {
         stack.push(Stack::Input);
-        if iter.next() != Some("(") {
+        if tokens.next() != Some("(") {
           return None;
         }
       } else if curr == "GROUP" {
         ret.push(Input::Flag("--start-group".to_string()));
         stack.push(Stack::Group);
-        if iter.next() != Some("(") {
+        if tokens.next() != Some("(") {
           return None;
         }
       } else if curr == "OUTPUT_FORMAT" {
         stack.push(Stack::OutputFormat);
-        if iter.next() != Some("(") {
+        if tokens.next() != Some("(") {
           return None;
         }
       } else if curr == "EXTERN" {
         stack.push(Stack::Extern);
-        if iter.next() != Some("(") {
+        if tokens.next() != Some("(") {
           return None;
         }
       } else if curr != ";" {
@@ -127,7 +178,7 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
           _ => {},
         }
       } else if curr == "AS_NEEDED" {
-        if iter.next() != Some("(") {
+        if tokens.next() != Some("(") {
           return None;
         }
         ret.push(Input::Flag("--as-needed".to_string()));
@@ -137,8 +188,11 @@ pub fn parse_linker_script<T: AsRef<str>>(input: T) -> Option<Vec<Input>> {
         // ignore
       } else if stack.last() == Some(&Stack::Extern) {
         ret.push(Input::Flag(format!("--undefined={}", curr)));
+      } else if curr.starts_with("-l") {
+        ret.push(Input::Flag(curr.into()));
       } else {
-        ret.push(Input::Library(true, From::from(curr), AllowedTypes::Any));
+        let file = dir.as_ref().join(curr);
+        ret.push(Input::Library(true, file, AllowedTypes::Any));
       }
     }
   }
@@ -183,16 +237,30 @@ pub fn expand_input(input: Input, search: &[PathBuf],
       let chain = if is_absolute {
         find_file(&path, search, allowed_types)
       } else {
-        find_file(format!("lib{}.so", path.display()),
-                  search, allowed_types)
-          .or_else(|| {
-            find_file(format!("lib{}.a", path.display()), search,
-                      allowed_types)
-          })
+        if !static_only {
+          find_file(format!("lib{}.so", path.display()),
+                    search, allowed_types)
+            .or_else(|| {
+              find_file(format!("lib{}.a", path.display()), search,
+                        allowed_types)
+            })
+        } else {
+          find_file(format!("lib{}.a", path.display()), search,
+                    allowed_types)
+        }
       };
 
       match chain {
         Some(p) => {
+          if filetype::could_be_linker_script(&p) {
+            if let Some(expanded) = parse_linker_script_file(&p) {
+              for arg in expanded.into_iter() {
+                ret.extend(expand_input(arg, search,
+                                        static_only)?);
+              }
+              return Ok(ret);
+            }
+          }
           let t = if !filetype::is_file_native(&p) {
             AllowedTypes::Bitcode
           } else {

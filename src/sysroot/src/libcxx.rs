@@ -52,8 +52,11 @@ impl Invocation {
       // which is important for this var.
       .cmake_str("LIBCXX_INSTALL_PREFIX",
                  format!("{}/", sysroot.display()))
+      .cmake_str("CMAKE_INSTALL_PREFIX",
+                 format!("{}/", sysroot.display()))
       .cmake_str("LIBCXX_TARGET_TRIPLE", "wasm32-unknown-unknown-wasm")
       .cmake_str("LIBCXX_CXX_ABI", "libcxxabi")
+      .cmake_str("CMAKE_BUILD_TYPE", "MinSizeRel")
       .cmake_path("LIBCXX_SYSROOT", &sysroot)
       .cmake_path("LIBCXX_CXX_ABI_LIBRARY_PATH",
                   sysroot.join("lib"))
@@ -62,7 +65,7 @@ impl Invocation {
       .cmake_path("LLVM_PATH", self.llvm_src())
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
-      .c_cxx_flag("-Wl,--relocatable,--import-table,--import-memory")
+      .c_cxx_flag(self.c_cxx_linker_args())
       .c_cxx_flag(format!("-I{}", self.libcxxabi_src().join("include").display()))
       .c_cxx_flag(format!("-I{}", libcxx.join("include/support/musl").display()))
       .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")

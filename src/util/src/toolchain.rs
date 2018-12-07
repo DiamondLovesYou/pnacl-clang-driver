@@ -18,7 +18,7 @@ pub struct WasmToolchain {
 }
 impl WasmToolchain {
   pub fn new() -> WasmToolchain {
-    use std::env::home_dir;
+    use dirs::home_dir;
 
     fn get_var(var: &str) -> PathBuf {
       let o = var_os(var)
@@ -63,7 +63,7 @@ impl WasmToolchain {
   // we use no emscripten tools
 
   pub fn emscripten_cache(&self) -> PathBuf {
-    use std::env::home_dir;
+    use dirs::home_dir;
     home_dir().unwrap()
       .join(".emscripten_cache/wasm")
       .create_if_not_exists()

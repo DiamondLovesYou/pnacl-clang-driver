@@ -19,6 +19,7 @@ pub extern crate regex;
 extern crate elf;
 extern crate tempdir;
 extern crate ctrlc;
+extern crate dirs;
 
 #[macro_use]
 extern crate lazy_static;
@@ -411,18 +412,18 @@ pub mod ldtools;
 pub mod toolchain;
 pub mod command_queue;
 
-pub trait CreateIfNotExists: Sized {
-  fn create_if_not_exists(self) -> std::io::Result<Self>;
-}
-impl CreateIfNotExists for PathBuf {
+pub trait CreateIfNotExists: Sized + AsRef<Path> {
   fn create_if_not_exists(self) -> std::io::Result<Self> {
-    if !self.exists() {
+    if !self.as_ref().exists() {
       std::fs::create_dir_all(&self)?;
     }
 
     Ok(self)
   }
 }
+impl CreateIfNotExists for PathBuf { }
+impl<'a> CreateIfNotExists for &'a Path { }
+impl<'a> CreateIfNotExists for &'a PathBuf { }
 
 #[cfg(feature = "nacl")]
 pub const SDK_VERSION: &'static str = include_str!(concat!(env!("OUT_DIR"),

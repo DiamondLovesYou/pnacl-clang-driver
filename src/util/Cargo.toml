@@ -4,13 +4,13 @@ license = "MIT"
 name = "util"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "0.0.0"
-
 [build-dependencies]
 regex = "*"
 
 [dependencies]
 ar = "0.3.0"
 ctrlc = "3.0.3"
+dirs = "1.0.3"
 lazy_static = "1.0"
 maplit = "*"
 regex = "*"

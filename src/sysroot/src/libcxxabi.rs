@@ -56,11 +56,14 @@ impl Invocation {
       // which is important for this var.
       .cmake_str("LIBCXXABI_INSTALL_PREFIX",
                  format!("{}/", sysroot.display()))
+      .cmake_str("CMAKE_INSTALL_PREFIX",
+                 format!("{}/", sysroot.display()))
+      .cmake_str("CMAKE_BUILD_TYPE", "MinSizeRel")
       .cmake_path("LLVM_PATH", self.llvm_src())
       .cmake_path("LIBCXXABI_LIBCXX_PATH", libcxx)
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
-      .c_cxx_flag("-Wl,--relocatable,--import-table,--import-memory")
+      .c_cxx_flag(self.c_cxx_linker_args())
       .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
       .c_cxx_flag(format!("-I{}", self.libunwind_src().join("include").display()))
       .generator("Ninja");

@@ -51,9 +51,9 @@ pub struct Invocation {
   clobber_libunwind_build: bool,
   clobber_libcxxabi_build: bool,
   clobber_libcxx_build: bool,
+  clobber_libc_build: bool,
+  clobber_compiler_rt_build: bool,
 
-  pub emit_llvm: bool,
-  pub emit_asm: bool,
   pub emit_wast: bool,
   pub emit_wasm: bool,
 }
@@ -66,6 +66,11 @@ impl Invocation {
   pub fn llvm_src(&self) -> &PathBuf {
     self.llvm_src.as_ref()
       .expect("Need `--llvm-src`")
+  }
+
+  pub fn c_cxx_linker_args(&self) -> String {
+    format!("-Wl,--relocatable,--import-table,--import-memory,--growable-table-import{}",
+            if self.emit_wast { ",--emit-wast" } else { "" })
   }
 }
 impl Default for Invocation {
@@ -81,11 +86,11 @@ impl Default for Invocation {
       clobber_libunwind_build: false,
       clobber_libcxxabi_build: false,
       clobber_libcxx_build: false,
+      clobber_libc_build: false,
+      clobber_compiler_rt_build: false,
 
       tc: WasmToolchain::default(),
 
-      emit_llvm: false,
-      emit_asm: false,
       emit_wast: false,
       emit_wasm: true,
     }
@@ -262,8 +267,6 @@ impl ToolInvocation for Invocation {
 
     match iteration {
       0 => return tool_arguments!(Invocation => [
-        EMIT_LLVM_FLAG,
-        EMIT_ASM_FLAG,
         EMIT_WAST_FLAG,
       ]),
       1 => {
@@ -277,6 +280,9 @@ impl ToolInvocation for Invocation {
         CLOBBER_LIBUNWIND_BUILD,
         CLOBBER_LIBCXXABI_BUILD,
         CLOBBER_LIBCXX_BUILD,
+        CLOBBER_LIBC_BUILD,
+        CLOBBER_COMPILER_RT_BUILD,
+        CLOBBER_ALL_BUILDS,
       ]),
       _ => return None,
     }
@@ -288,6 +294,7 @@ impl ToolInvocation for Invocation {
 pub fn add_default_args(args: &mut Vec<String>) {
   args.push("-fno-slp-vectorize".to_string());
   args.push("-fno-vectorize".to_string());
+  args.push("-fPIC".to_string());
 }
 
 pub fn link(invoc: &Invocation,
@@ -306,27 +313,14 @@ pub fn link(invoc: &Invocation,
   args.push("-o".to_string());
   args.push(format!("{}", out.display()));
 
-  /*let ar = invoc.tc.llvm_tool("llvm-ar");
-  let mut cmd = Command::new(ar);
-  cmd.arg("cr")
-    .arg(format!("{}", out.display()));
-  let cmd = queue
-    .enqueue_external(Some("archive"),
-                      cmd, None, false,
-                      None::<Vec<::tempdir::TempDir>>);
-  cmd.prev_outputs = true;
-  cmd.output_override = false;*/
-
   let mut linker = ld_driver::Invocation::default();
-  linker.emit_llvm = invoc.emit_llvm;
-  linker.emit_asm  = invoc.emit_asm;
   linker.emit_wast = invoc.emit_wast;
   linker.emit_wasm = invoc.emit_wasm;
   linker.optimize = Some(util::OptimizationGoal::Size);
   linker.relocatable = true;
   linker.import_memory = true;
   linker.import_table = true;
-  //linker.ld_flags.push("--warn-unresolved-symbols".into());
+  linker.growable_table_import = true;
   let libname = out_name[..out_name.len() - 3].to_string();
   linker.s2wasm_libname = Some(libname);
   linker.add_search_path(invoc.tc.sysroot_cache().join("lib"));
@@ -345,15 +339,6 @@ pub fn link(invoc: &Invocation,
 
   Ok(out)
 }
-
-/*pub fn create_imports_file<T, U>(invoc: &Invocation,
-                                 funcs: T)
-  -> Result<(), Box<Error>>
-  where T: Iterator<Item = U>,
-        U: AsRef<str>,
-{
-
-}*/
 
 argument!(impl LIBRARIES where { Some(r"^--build=(.*)$"), None } for Invocation {
     fn libraries_arg(this, _single, cap) {
@@ -390,17 +375,29 @@ tool_argument! {
     this.clobber_libcxx_build = b;
   }
 }
-argument!(impl EMIT_LLVM_FLAG where { Some(r"^--emit-llvm$"), None } for Invocation {
-    fn emit_llvm_flag(this, _single, _cap) {
-      this.emit_llvm = true;
-    }
-});
+tool_argument! {
+  pub CLOBBER_LIBC_BUILD: Invocation = simple_no_flag(b) "clobber-libc-build" =>
+  fn clobber_libc_build_arg(this) {
+    this.clobber_libc_build = b;
+  }
+}
+tool_argument! {
+  pub CLOBBER_COMPILER_RT_BUILD: Invocation = simple_no_flag(b) "clobber-compiler-rt-build" =>
+  fn clobber_compiler_rt_build_arg(this) {
+    this.clobber_compiler_rt_build = b;
+  }
+}
 
-argument!(impl EMIT_ASM_FLAG where { Some(r"^--emit-S$"), None } for Invocation {
-    fn emit_asm_flag(this, _single, _cap) {
-      this.emit_asm = true;
-    }
-});
+tool_argument! {
+  pub CLOBBER_ALL_BUILDS: Invocation = simple_no_flag(b) "clobber-all-builds" =>
+  fn clobber_all_builds_arg(this) {
+    this.clobber_libunwind_build = b;
+    this.clobber_libcxxabi_build = b;
+    this.clobber_libcxx_build = b;
+    this.clobber_libc_build = b;
+    this.clobber_compiler_rt_build = b;
+  }
+}
 
 argument!(impl EMIT_WAST_FLAG where { Some(r"^--emit-wast$"), None } for Invocation {
     fn emit_wast_flag(this, _single, _cap) {

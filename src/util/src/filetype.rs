@@ -312,9 +312,9 @@ pub fn is_file_native<T: AsRef<Path>>(path: T) -> bool {
 
 pub fn could_be_linker_script<T: AsRef<Path>>(path: T) -> bool {
   let exts: ::std::collections::HashSet<Option<::std::ffi::OsString>> = hashset!{
-        Some(From::from(".o")), Some(From::from(".so")),
-        Some(From::from(".a")), Some(From::from(".po")),
-        Some(From::from(".pa")), Some(From::from(".x")),
+        Some(From::from("o")), Some(From::from("so")),
+        Some(From::from("a")), Some(From::from("po")),
+        Some(From::from("pa")), Some(From::from("x")),
     };
 
   exts.contains(&path.as_ref().extension().map(|v| From::from(v) )) &&

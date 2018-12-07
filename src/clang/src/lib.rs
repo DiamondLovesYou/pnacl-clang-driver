@@ -201,6 +201,8 @@ pub struct Invocation {
 
   shared: bool,
 
+  pub emit_wast: bool,
+
   file_type: Option<FileLang>,
   inputs: Vec<(PathBuf, Option<FileLang>)>,
   header_inputs: Vec<PathBuf>,
@@ -244,6 +246,7 @@ impl Invocation {
       pic: false,
 
       shared: false,
+      emit_wast: false,
 
       file_type: None,
       inputs: Default::default(),
@@ -336,7 +339,6 @@ BASIC OPTIONS:
       match self.driver_mode {
         DriverMode::CXX => {
           libs.push(PathBuf::from("-lc++"));
-          libs.push(PathBuf::from("-lc++abi"));
         },
         _ => {}
       }
@@ -423,6 +425,7 @@ BASIC OPTIONS:
     cmd.args(&[
       "-target", "wasm32-unknown-unknown-wasm",
       "-mthread-model", "single",
+      "-fno-threadsafe-statics",
     ]);
 
     self.optimization.check();
@@ -436,8 +439,7 @@ BASIC OPTIONS:
       "-D__wasm32__",
     ]);
     if !self.no_std_incxx && self.driver_mode == DriverMode::CXX {
-      cmd.arg("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
-        .arg("-D_LIBCPP_ABI_VERSION=2");
+      cmd.arg("-D_LIBCPP_HAS_THREAD_API_PTHREAD");
     }
     if !self.is_pch_mode() {
       match self.gcc_mode {
@@ -546,9 +548,11 @@ BASIC OPTIONS:
       self.clang_add_std_args(&mut cmd);
       self.clang_add_input_args(&mut cmd);
 
-      queue.enqueue_external(Some("clang"), cmd,
-                             Some("-o"), false,
-                             None::<Vec<TempDir>>);
+      let d = queue.enqueue_simple_external(Some("clang"), cmd,
+                                            Some("-o".into()));
+      //d.copy_output_to = self.output.clone();
+      //d.output_override = true;
+      //d.prev_outputs = false;
     } else {
       let header_inputs = self.header_inputs.clone();
       let output = self.output.as_ref();
@@ -562,13 +566,32 @@ BASIC OPTIONS:
         let mut cmd = self.clang_base_cmd();
         self.clang_add_std_args(&mut cmd);
 
-        let out = output.map(|_| "-o" );
+        let out = output.map(|_| "-o".into() );
         cmd.arg(input);
 
-        queue.enqueue_external(Some("clang"), cmd,
-                               out, false,
-                               None::<Vec<TempDir>>);
+        queue.enqueue_simple_external(Some("clang"), cmd, out);
       }
+    }
+
+    if self.emit_wast && false {
+      let f = |this: &mut &mut Self| {
+        // Do this manual to avoid polluting the previous outputs.
+        let wasm_dis = this.tc.binaryen_tool("wasm-dis");
+        let out = this.get_output();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+          .arg(r#"echo "Writing wast to ${1%.*}.wast"; $0 $1 | c++filt > ${1%.*}.wast"#)
+          .arg(wasm_dis)
+          .arg(out);
+
+        // ignore result, we just want to wait till it's done.
+        let _ = cmd.spawn()?.wait();
+
+        Ok(())
+      };
+
+      queue.enqueue_function(Some("--emit-wast"), f)
+        .prev_outputs = false;
     }
   }
 
@@ -576,6 +599,8 @@ BASIC OPTIONS:
     let mut ld = ld_driver::Invocation::default();
     ld.tc = self.tc.clone();
     ld.optimize = Some(self.optimization);
+    ld.emit_wast = self.emit_wast;
+    ld.relocatable = self.shared;
 
     let mut args = self.linker_args.clone();
     let inputs = self.inputs.iter()
@@ -738,8 +763,9 @@ impl ToolInvocation for Invocation {
         COMPILE, PREPROCESS,
         OUTPUT,
       ]),
-      5 => return tool_arguments!(Invocation => [X_ARG, INPUTS,]),
-      6 => return tool_arguments!(Invocation => [UNSUPPORTED,]),
+      5 => return tool_arguments!(Self => [EMIT_WAST, ]),
+      6 => return tool_arguments!(Invocation => [X_ARG, INPUTS,]),
+      7 => return tool_arguments!(Invocation => [UNSUPPORTED,]),
       _ => return None,
     }
 
@@ -1103,3 +1129,9 @@ tool_argument!(INPUTS: Invocation = { Some(r"^(.+)$"), None };
                  this.add_input_file(p, None);
                  Ok(())
                });
+tool_argument! {
+  pub EMIT_WAST: Invocation = simple_no_flag(b) "emit-wast" =>
+  fn emit_wast_arg(this) {
+    this.emit_wast = b;
+  }
+}

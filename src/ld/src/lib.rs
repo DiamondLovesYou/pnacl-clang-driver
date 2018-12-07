@@ -57,6 +57,9 @@ pub struct Invocation {
   global_base: Option<usize>,
   pub import_memory: bool,
   pub import_table: bool,
+  pub growable_table_import: bool,
+
+  pub verbose: bool,
 
   pub search_paths: Vec<PathBuf>,
 
@@ -116,6 +119,9 @@ impl Default for Invocation {
       global_base: None,
       import_memory: false,
       import_table: false,
+      growable_table_import: false,
+
+      verbose: false,
 
       search_paths: Default::default(),
 
@@ -247,8 +253,11 @@ impl Invocation {
         let _file: &PathBuf = match &input {
           &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
           &Input::Library(_, ref p, _) => p,
-          &Input::Flag(ref _flag) => {
-            panic!("TODO: linker scripts");
+          &Input::Flag(ref flag) => {
+            let flags = vec![flag.clone()];
+            util::process_invocation_args(self, flags,
+                                          false)?;
+            continue 'outer;
           }
           &Input::File(ref path) => path,
         };
@@ -295,7 +304,7 @@ impl util::ToolInvocation for Invocation {
           // lol
         }
       },
-      1 if !skip_inputs_check => {
+      3 if !skip_inputs_check => {
         if !self.has_native_inputs() && !self.has_bitcode_inputs() {
           Err("no inputs")?;
         }
@@ -309,7 +318,7 @@ impl util::ToolInvocation for Invocation {
   fn args(&self, iteration: usize) -> Option<util::ToolArgs<Invocation>> {
     match iteration {
       0 => {
-        tool_arguments!(Invocation => [TARGET, SEARCH_PATH, NO_STDLIB, ])
+        tool_arguments!(Invocation => [TARGET, SEARCH_PATH, NO_STDLIB, LLD_FLAVOR_WASM, ])
       },
       1 => tool_arguments!(Invocation => [
         EMIT_LLVM_FLAG,
@@ -339,6 +348,8 @@ impl util::ToolInvocation for Invocation {
           IMPORT_MEMORY,
           GLOBAL_BASE,
           RELOCATABLE,
+          VERBOSE,
+          GROWABLE_TABLE_IMPORT,
           UNDEFINED,
           UNSUPPORTED,
         ]),
@@ -353,8 +364,6 @@ impl util::Tool for Invocation {
   fn enqueue_commands(&mut self,
                       queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     use std::process::Command;
-
-    use tempdir::TempDir;
 
     let mut cmd = Command::new(self.tc.llvm_tool("wasm-ld"));
     if self.relocatable {
@@ -374,6 +383,12 @@ impl util::Tool for Invocation {
     if self.import_table {
       cmd.arg("--import-table");
     }
+    if self.verbose {
+      cmd.arg("--verbose");
+    }
+    if self.growable_table_import {
+      cmd.arg("--growable-table-import");
+    }
     match self.strip {
       util::StripMode::None => {},
       util::StripMode::Debug => {
@@ -385,7 +400,7 @@ impl util::Tool for Invocation {
     }
     for input in self.bitcode_inputs.iter() {
       match input {
-        &Input::Library(_, ref p, _) => {
+        &Input::Library(false, ref p, _) => {
           cmd.arg("-L")
             .arg(p.parent().unwrap());
 
@@ -411,14 +426,33 @@ impl util::Tool for Invocation {
           cmd.arg(format!("-l{}", s));
           continue;
         },
+        &Input::Library(true, ref p, _) => {
+          cmd.arg(p);
+          continue;
+        },
         _ => {},
       }
       cmd.arg(format!("{}", input));
     }
 
-    queue.enqueue_external(Some("lld"),
-                           cmd, Some("-o"),
-                           false, None::<Vec<TempDir>>);
+    let output = if self.emit_wast { self.output.take() } else { None };
+
+    queue.enqueue_simple_external(Some("lld"), cmd,
+                                  Some("-o".into()))
+      .copy_output_to = output.clone();
+
+    if self.emit_wast {
+      let wasm_dis = self.tc.binaryen_tool("wasm-dis");
+      let mut cmd = Command::new("sh");
+      cmd.arg("-c")
+        .arg(r#"echo "Writing wast to ${1%.*}.wast"; $0 $1 | c++filt > ${1%.*}.wast"#)
+        .arg(wasm_dis)
+        .arg(output.as_ref().unwrap());
+
+      queue.enqueue_simple_external(Some("--emit-wast"),
+                                    cmd, None)
+        .prev_outputs = false;
+    }
 
     Ok(())
   }
@@ -463,6 +497,17 @@ tool_argument!(TARGET: Invocation = { Some(r"^--?target=(.+)$"), Some(r"^--?targ
                    this.arch = Some(arch);
                    Ok(())
                });
+tool_argument!(LLD_FLAVOR_WASM: Invocation = { None, Some(r#"^-flavor$"#) };
+               fn lld_flavor_wasm_arg(_this, _single, cap) {
+                   let flavor = cap.get(0).unwrap().as_str();
+                   match flavor {
+                     "wasm" => Ok(()),
+                     _ => {
+                       Err(format!("flavor `{}` unsupported, flavor must be `wasm`",
+                                   flavor).into())
+                     }
+                   }
+               });
 tool_argument!(OUTPUT: Invocation = { Some(r"^-o(.+)$"), Some(r"^-(o|-output)$") };
                fn set_output(this, single, cap) {
                    if this.output.is_some() {
@@ -497,6 +542,18 @@ tool_argument! {
   pub IMPORT_TABLE: Invocation = simple_no_flag(b) "import-table" =>
   fn import_table_arg1(this) {
     this.import_table = b;
+  }
+}
+tool_argument! {
+  pub VERBOSE: Invocation = simple_no_flag(b) "verbose" =>
+  fn verbose_flag(this) {
+    this.verbose = b;
+  }
+}
+tool_argument! {
+  pub GROWABLE_TABLE_IMPORT: Invocation = simple_no_flag(b) "growable-table-import" =>
+  fn growable_table_import_flag(this) {
+    this.growable_table_import = b;
   }
 }
 
