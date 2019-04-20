@@ -15,6 +15,7 @@ lazy_static = "1.0"
 maplit = "*"
 regex = "*"
 tempdir = "0.3.5"
+log = "0.4.6"
 
 [dependencies.elf]
 git = "https://github.com/cole14/rust-elf.git"

@@ -16,6 +16,7 @@ use util::{EhMode, OptimizationGoal, Tool, ToolInvocation,
            CommandQueue, ToolArgs};
 use util::{need_nacl_toolchain};
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
+use util::command_queue::RunState;
 
 #[macro_use]
 extern crate util;
@@ -339,6 +340,7 @@ BASIC OPTIONS:
       match self.driver_mode {
         DriverMode::CXX => {
           libs.push(PathBuf::from("-lc++"));
+          libs.push(PathBuf::from("-lc++abi"));
         },
         _ => {}
       }
@@ -548,11 +550,12 @@ BASIC OPTIONS:
       self.clang_add_std_args(&mut cmd);
       self.clang_add_input_args(&mut cmd);
 
-      let d = queue.enqueue_simple_external(Some("clang"), cmd,
-                                            Some("-o".into()));
-      //d.copy_output_to = self.output.clone();
-      //d.output_override = true;
-      //d.prev_outputs = false;
+      cmd.arg("-o")
+        .arg(self.get_output());
+
+      let _ = queue
+        .enqueue_simple_external(Some("clang"), cmd,
+                                 None);
     } else {
       let header_inputs = self.header_inputs.clone();
       let output = self.output.as_ref();
@@ -573,25 +576,27 @@ BASIC OPTIONS:
       }
     }
 
-    if self.emit_wast && false {
-      let f = |this: &mut &mut Self| {
-        // Do this manual to avoid polluting the previous outputs.
-        let wasm_dis = this.tc.binaryen_tool("wasm-dis");
-        let out = this.get_output();
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-          .arg(r#"echo "Writing wast to ${1%.*}.wast"; $0 $1 | c++filt > ${1%.*}.wast"#)
-          .arg(wasm_dis)
-          .arg(out);
+    if self.emit_wast {
+      if let Some(GccMode::Dashc) = self.gcc_mode {
+        let f = |this: &mut &mut Self, _: &mut RunState| {
+          // Do this manual to avoid polluting the previous outputs.
+          let wasm_dis = this.tc.binaryen_tool("wasm-dis");
+          let out = this.get_output();
+          let mut cmd = Command::new("sh");
+          cmd.arg("-c")
+            .arg(r#"echo "$0 $1 | c++filt > ${1%.*}.wast"#)
+            .arg(wasm_dis)
+            .arg(out);
 
-        // ignore result, we just want to wait till it's done.
-        let _ = cmd.spawn()?.wait();
+          // ignore result, we just want to wait till it's done.
+          let _ = cmd.spawn()?.wait();
 
-        Ok(())
-      };
+          Ok(())
+        };
 
-      queue.enqueue_function(Some("--emit-wast"), f)
-        .prev_outputs = false;
+        queue.enqueue_state_function(Some("--emit-wast"), f)
+          .prev_outputs = false;
+      }
     }
   }
 
@@ -603,6 +608,16 @@ BASIC OPTIONS:
     ld.relocatable = self.shared;
 
     let mut args = self.linker_args.clone();
+    // first, add crt1 (which contains `_start_c`). It'll depend on
+    // `main` and `__libc_start_main` which will be found in later
+    // inputs.
+    if !self.shared && self.gcc_mode == None {
+      let p = self.tc.sysroot_lib().join("crt1.o");
+      ld.add_input(ld_driver::Input::File(p))?;
+
+      ld.entry = Some("_start_c".into());
+    }
+
     let inputs = self.inputs.iter()
       .map(|&(ref f, _)| format!("{}", f.display()) );
     args.extend(inputs);
@@ -628,12 +643,10 @@ BASIC OPTIONS:
   fn add_input_file<T: AsRef<Path>>(&mut self, file: T,
                                     file_lang: Option<FileLang>) {
     let file = file.as_ref().to_path_buf();
+    let file_lang = file_lang.or_else(|| self.file_type );
     self.inputs.push((file.clone(), file_lang.clone()));
     let file_lang = file_lang
-      .or_else(|| { self.file_type })
-      .or_else(|| {
-        FileLang::from_path(file.clone())
-      });
+      .or_else(|| FileLang::from_path(file.clone()) );
     let is_header_input = match file_lang {
       Some(FileLang::CHeader) | Some(FileLang::CxxHeader) => true,
       _ => false,
@@ -660,6 +673,31 @@ impl Tool for Invocation {
                              None, true,
                              None::<Vec<TempDir>>);
       return Ok(());
+    }
+
+    // force -o if -c is used and -o is not given (zlib's configure does this shit).
+    if let Some(GccMode::Dashc) = self.gcc_mode {
+      if self.output.is_none() {
+        if let Some(&(ref path, _)) = self.inputs.iter().next() {
+          self.output = Some(path.with_extension("o"));
+        }
+      }
+    }
+
+    // force -c mode if we're given source files (zlib's configure does this shit).
+    if self.gcc_mode.is_none() {
+      let mut source_inputs = true;
+      for &(ref path, ref file_lang) in self.inputs.iter() {
+        let file_lang = file_lang.or_else(|| FileLang::from_path(path) );
+        if !file_lang.is_some() {
+          source_inputs = false;
+          break;
+        }
+      }
+
+      if source_inputs {
+        self.gcc_mode = Some(GccMode::Dashc);
+      }
     }
 
     if self.gcc_mode.is_some() {

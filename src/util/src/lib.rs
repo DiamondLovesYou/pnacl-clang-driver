@@ -20,6 +20,8 @@ extern crate elf;
 extern crate tempdir;
 extern crate ctrlc;
 extern crate dirs;
+#[macro_use]
+extern crate log;
 
 #[macro_use]
 extern crate lazy_static;
@@ -194,6 +196,7 @@ extern crate maplit;
       action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
         $fn_name(this, single, cap)
       }),
+      help: None,
     };
     #[allow(unused_variables)]
     fn $fn_name($this_name: &mut $ty, single: bool, cap: $crate::regex::Captures)
@@ -216,6 +219,7 @@ extern crate maplit;
       action: Some(|this: &mut $ty, single: bool, cap: $crate::regex::Captures| {
         $fn_name(this, single, cap)
       }),
+      help: None,
     };
     #[allow(unused_variables)]
     fn $fn_name<$first_ty $(,$tys)*>($this_name: &mut $first_ty, single: bool, cap: $crate::regex::Captures)
@@ -235,6 +239,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: ($single_regex).map(|v: &str| From::from(v) ),
           split: ($split).map(|v: &str| From::from(v) ),
+          help: None,
           action: Some($fn_name as util::ToolArgActionFn<$ty>),
         }
       };
@@ -254,6 +259,7 @@ extern crate maplit;
           single: ($single_regex).map(|v: &str| From::from(v) ),
           split: ($split).map(|v: &str| From::from(v) ),
           action: None,
+          help: None,
         }
       };
     }
@@ -270,6 +276,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split:  None,
+          help: None,
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -292,6 +299,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
           split: Some(From::from($split)),
+          help: None,
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
       };
@@ -313,6 +321,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split: Some(From::from($split)),
+          help: None,
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -336,6 +345,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split: None,
+          help: None,
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
       };
@@ -348,6 +358,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
           split: Some(From::from($split)),
+          help: None,
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
       };
@@ -360,6 +371,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split: Some(From::from($split)),
+          help: None,
 
           action: Some($fn_name as $crate::ToolArgActionFn<$this>),
         }
@@ -375,6 +387,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split: None,
+          help: None,
           action: None,
         }
       };
@@ -387,6 +400,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: None,
           split: Some(From::from($split)),
+          help: None,
           action: None,
         }
       };
@@ -399,6 +413,7 @@ extern crate maplit;
           name: ::std::borrow::Cow::Borrowed(stringify!($name)),
           single: Some(From::from($single)),
           split: Some(From::from($split)),
+          help: None,
           action: None,
         }
       };
@@ -856,6 +871,8 @@ pub struct ToolArg<This: ?Sized> {
   pub single: Option<Cow<'static, str>>,
   pub split: Option<Cow<'static, str>>, // Note there is no way to match on the next arg.
 
+  pub help: Option<Cow<'static, str>>,
+
   pub action: ToolArgAction<This>,
 }
 
@@ -919,6 +936,7 @@ impl<This> Clone for ToolArg<This>
       name: self.name.clone(),
       single: self.single.clone(),
       split: self.split.clone(),
+      help: self.help.clone(),
       action: self.action,
     }
   }

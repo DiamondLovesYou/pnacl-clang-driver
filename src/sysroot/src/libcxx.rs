@@ -13,7 +13,7 @@ impl Invocation {
     super::get_system_dir()
       .join("libcxx")
   }
-  pub fn build_libcxx(&self, mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
+  pub fn build_libcxx(&self, queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
     use std::process::Command;
     use tempdir::TempDir;
 
@@ -48,6 +48,7 @@ impl Invocation {
       .cmake_on("LIBCXX_ENABLE_THREADS")
       .cmake_on("LIBCXX_INSTALL_SUPPORT_HEADERS")
       .cmake_off("LIBCXX_ENABLE_WERROR")
+      .cmake_off("LIBCXX_ENABLE_EXCEPTIONS")
       // cmake removes the trailing slash if it is a path type,
       // which is important for this var.
       .cmake_str("LIBCXX_INSTALL_PREFIX",
@@ -65,7 +66,11 @@ impl Invocation {
       .cmake_path("LLVM_PATH", self.llvm_src())
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
-      .c_cxx_flag(self.c_cxx_linker_args())
+      .c_cxx_flag("-O3")
+      .c_cxx_flag("--emit-wast")
+      .c_cxx_flag(self.c_cxx_linker_cflags())
+      .shared_ld_flag("-Wl,--relocatable")
+      .exe_ld_flag("-Wl,--gc-sections")
       .c_cxx_flag(format!("-I{}", self.libcxxabi_src().join("include").display()))
       .c_cxx_flag(format!("-I{}", libcxx.join("include/support/musl").display()))
       .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")

@@ -80,6 +80,7 @@ impl WasmToolchain {
       name: "sysroot-override".into(),
       single: expand_style_single!(single_and_split_abs_path(doesnt_matter) => "sysroot"),
       split: expand_style_split!(single_and_split_abs_path(doesnt_matter) => "sysroot"),
+      help: None,
       action: Some(|this: &mut T, single, cap| {
         let tc = this.wasm_toolchain_mut();
         expand_style!(single_and_split_abs_path(path) => single, cap);

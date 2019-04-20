@@ -12,3 +12,5 @@ cd compiler-rt && git checkout -B master 4e8e8d6b18fccced6738aa85dfc28105c7add46
 git clone https://github.com/llvm-mirror/libcxxabi.git
 cd libcxxabi && git checkout -B master dd73082d02640d8677d585c8a48243dcdd93e195 && cd ..
 git clone https://github.com/DiamondLovesYou/musl.git -b wasm-prototype-1
+git clone https://github.com/madler/zlib.git
+cd zlib && git checkout -B master cacf7f1d4e3d44d871b605da3b647f07d718623f && cd ..

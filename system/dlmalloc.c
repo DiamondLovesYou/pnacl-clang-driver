@@ -1,13 +1,23 @@
 
 /* XXX Emscripten XXX */
-#if __EMSCRIPTEN__
+#if __wasm__
 /*#define DLMALLOC_EXPORT __attribute__((__weak__, __visibility__("default")))*/
 /* mmap uses malloc, so malloc can't use mmap */
-#define HAVE_MMAP 0
+#define HAVE_MMAP 1
+#define HAVE_MORECORE 0
 /* we can only grow the heap up anyhow, so don't try to trim */
 #define MORECORE_CANNOT_TRIM 1
-/* XXX Emscripten Tracing API. This defines away the code if tracing is disabled. */
-#include <emscripten/trace.h>
+#define MMAP_CLEARS 1
+#define malloc_getpagesize ((size_t)65536U)
+#define INSECURE 0
+#define FOOTERS 0
+
+void __wasm_console_log_address(const char* msg, unsigned long addr);
+void __wasm_trace_alloc(unsigned long bytes, void* addr);
+void __wasm_trace_free(void* addr);
+
+#define CORRUPTION_ERROR_ACTION(m) __wasm_console_log_address("CORRUPTION DETECTED", (size_t)m)
+#define USAGE_ERROR_ACTION(m, p) __wasm_console_log_address("MALLOC USAGE ERROR", (size_t)p);
 
 /* Make malloc() and free() threadsafe by securing the memory allocations with pthread mutexes. */
 #if __EMSCRIPTEN_PTHREADS__
@@ -2870,79 +2880,79 @@ static size_t traverse_and_check(mstate m);
 #if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
 #define compute_tree_index(S, I)\
 {\
-unsigned int X = S >> TREEBIN_SHIFT;\
-if (X == 0)\
-I = 0;\
-else if (X > 0xFFFF)\
-I = NTREEBINS-1;\
-else {\
-unsigned int K = (unsigned) sizeof(X)*__CHAR_BIT__ - 1 - (unsigned) __builtin_clz(X); \
-I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
-}\
+  unsigned int X = S >> TREEBIN_SHIFT;\
+  if (X == 0)\
+    I = 0;\
+  else if (X > 0xFFFF)\
+    I = NTREEBINS-1;\
+  else {\
+    unsigned int K = (unsigned) sizeof(X)*__CHAR_BIT__ - 1 - (unsigned) __builtin_clz(X); \
+    I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
+  }\
 }
 
 #elif defined (__INTEL_COMPILER)
 #define compute_tree_index(S, I)\
 {\
-size_t X = S >> TREEBIN_SHIFT;\
-if (X == 0)\
-I = 0;\
-else if (X > 0xFFFF)\
-I = NTREEBINS-1;\
-else {\
-unsigned int K = _bit_scan_reverse (X); \
-I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
-}\
+  size_t X = S >> TREEBIN_SHIFT;\
+  if (X == 0)\
+    I = 0;\
+  else if (X > 0xFFFF)\
+    I = NTREEBINS-1;\
+  else {\
+    unsigned int K = _bit_scan_reverse (X); \
+    I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
+  }\
 }
 
 #elif defined(_MSC_VER) && _MSC_VER>=1300
 #define compute_tree_index(S, I)\
 {\
-size_t X = S >> TREEBIN_SHIFT;\
-if (X == 0)\
-I = 0;\
-else if (X > 0xFFFF)\
-I = NTREEBINS-1;\
-else {\
-unsigned int K;\
-_BitScanReverse((DWORD *) &K, (DWORD) X);\
-I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
-}\
+  size_t X = S >> TREEBIN_SHIFT;\
+  if (X == 0)\
+    I = 0;\
+  else if (X > 0xFFFF)\
+    I = NTREEBINS-1;\
+  else {\
+    unsigned int K;\
+    _BitScanReverse((DWORD *) &K, (DWORD) X);\
+    I =  (bindex_t)((K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1)));\
+  }\
 }
 
 #else /* GNUC */
 #define compute_tree_index(S, I)\
 {\
-size_t X = S >> TREEBIN_SHIFT;\
-if (X == 0)\
-I = 0;\
-else if (X > 0xFFFF)\
-I = NTREEBINS-1;\
-else {\
-unsigned int Y = (unsigned int)X;\
-unsigned int N = ((Y - 0x100) >> 16) & 8;\
-unsigned int K = (((Y <<= N) - 0x1000) >> 16) & 4;\
-N += K;\
-N += K = (((Y <<= K) - 0x4000) >> 16) & 2;\
-K = 14 - N + ((Y <<= K) >> 15);\
-I = (K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1));\
-}\
+  size_t X = S >> TREEBIN_SHIFT;\
+  if (X == 0)\
+    I = 0;\
+  else if (X > 0xFFFF)\
+    I = NTREEBINS-1;\
+  else {\
+    unsigned int Y = (unsigned int)X;\
+    unsigned int N = ((Y - 0x100) >> 16) & 8;\
+    unsigned int K = (((Y <<= N) - 0x1000) >> 16) & 4;\
+    N += K;\
+    N += K = (((Y <<= K) - 0x4000) >> 16) & 2;\
+    K = 14 - N + ((Y <<= K) >> 15);\
+    I = (K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1));\
+  }\
 }
 #endif /* GNUC */
 
 /* Bit representing maximum resolved size in a treebin at i */
 #define bit_for_tree_index(i) \
-(i == NTREEBINS-1)? (SIZE_T_BITSIZE-1) : (((i) >> 1) + TREEBIN_SHIFT - 2)
+   (i == NTREEBINS-1)? (SIZE_T_BITSIZE-1) : (((i) >> 1) + TREEBIN_SHIFT - 2)
 
 /* Shift placing maximum resolved bit in a treebin at i as sign bit */
 #define leftshift_for_tree_index(i) \
-((i == NTREEBINS-1)? 0 : \
-((SIZE_T_BITSIZE-SIZE_T_ONE) - (((i) >> 1) + TREEBIN_SHIFT - 2)))
+   ((i == NTREEBINS-1)? 0 : \
+    ((SIZE_T_BITSIZE-SIZE_T_ONE) - (((i) >> 1) + TREEBIN_SHIFT - 2)))
 
 /* The size of the smallest chunk held in bin with index i */
 #define minsize_for_tree_index(i) \
-((SIZE_T_ONE << (((i) >> 1) + TREEBIN_SHIFT)) |  \
-(((size_t)((i) & SIZE_T_ONE)) << (((i) >> 1) + TREEBIN_SHIFT - 1)))
+   ((SIZE_T_ONE << (((i) >> 1) + TREEBIN_SHIFT)) |  \
+   (((size_t)((i) & SIZE_T_ONE)) << (((i) >> 1) + TREEBIN_SHIFT - 1)))
 
 
 /* ------------------------ Operations on bin maps ----------------------- */
@@ -2973,25 +2983,25 @@ I = (K << 1) + ((S >> (K + (TREEBIN_SHIFT-1)) & 1));\
 #if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
 #define compute_bit2idx(X, I)\
 {\
-unsigned int J;\
-J = __builtin_ctz(X); \
-I = (bindex_t)J;\
+  unsigned int J;\
+  J = __builtin_ctz(X); \
+  I = (bindex_t)J;\
 }
 
 #elif defined (__INTEL_COMPILER)
 #define compute_bit2idx(X, I)\
 {\
-unsigned int J;\
-J = _bit_scan_forward (X); \
-I = (bindex_t)J;\
+  unsigned int J;\
+  J = _bit_scan_forward (X); \
+  I = (bindex_t)J;\
 }
 
 #elif defined(_MSC_VER) && _MSC_VER>=1300
 #define compute_bit2idx(X, I)\
 {\
-unsigned int J;\
-_BitScanForward((DWORD *) &J, X);\
-I = (bindex_t)J;\
+  unsigned int J;\
+  _BitScanForward((DWORD *) &J, X);\
+  I = (bindex_t)J;\
 }
 
 #elif USE_BUILTIN_FFS
@@ -3000,14 +3010,14 @@ I = (bindex_t)J;\
 #else
 #define compute_bit2idx(X, I)\
 {\
-unsigned int Y = X - 1;\
-unsigned int K = Y >> (16-4) & 16;\
-unsigned int N = K;        Y >>= K;\
-N += K = Y >> (8-3) &  8;  Y >>= K;\
-N += K = Y >> (4-2) &  4;  Y >>= K;\
-N += K = Y >> (2-1) &  2;  Y >>= K;\
-N += K = Y >> (1-0) &  1;  Y >>= K;\
-I = (bindex_t)(N + Y);\
+  unsigned int Y = X - 1;\
+  unsigned int K = Y >> (16-4) & 16;\
+  unsigned int N = K;        Y >>= K;\
+  N += K = Y >> (8-3) &  8;  Y >>= K;\
+  N += K = Y >> (4-2) &  4;  Y >>= K;\
+  N += K = Y >> (2-1) &  2;  Y >>= K;\
+  N += K = Y >> (1-0) &  1;  Y >>= K;\
+  I = (bindex_t)(N + Y);\
 }
 #endif /* GNUC */
 
@@ -3593,239 +3603,239 @@ static void internal_malloc_stats(mstate m) {
 /* ----------------------- Operations on smallbins ----------------------- */
 
 /*
- Various forms of linking and unlinking are defined as macros.  Even
- the ones for trees, which are very long but have very short typical
- paths.  This is ugly but reduces reliance on inlining support of
- compilers.
- */
+  Various forms of linking and unlinking are defined as macros.  Even
+  the ones for trees, which are very long but have very short typical
+  paths.  This is ugly but reduces reliance on inlining support of
+  compilers.
+*/
 
 /* Link a free chunk into a smallbin  */
 #define insert_small_chunk(M, P, S) {\
-bindex_t I  = small_index(S);\
-mchunkptr B = smallbin_at(M, I);\
-mchunkptr F = B;\
-assert(S >= MIN_CHUNK_SIZE);\
-if (!smallmap_is_marked(M, I))\
-mark_smallmap(M, I);\
-else if (RTCHECK(ok_address(M, B->fd)))\
-F = B->fd;\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-}\
-B->fd = P;\
-F->bk = P;\
-P->fd = F;\
-P->bk = B;\
+  bindex_t I  = small_index(S);\
+  mchunkptr B = smallbin_at(M, I);\
+  mchunkptr F = B;\
+  assert(S >= MIN_CHUNK_SIZE);\
+  if (!smallmap_is_marked(M, I))\
+    mark_smallmap(M, I);\
+  else if (RTCHECK(ok_address(M, B->fd)))\
+    F = B->fd;\
+  else {\
+    CORRUPTION_ERROR_ACTION(M);\
+  }\
+  B->fd = P;\
+  F->bk = P;\
+  P->fd = F;\
+  P->bk = B;\
 }
 
 /* Unlink a chunk from a smallbin  */
 #define unlink_small_chunk(M, P, S) {\
-mchunkptr F = P->fd;\
-mchunkptr B = P->bk;\
-bindex_t I = small_index(S);\
-assert(P != B);\
-assert(P != F);\
-assert(chunksize(P) == small_index2size(I));\
-if (RTCHECK(F == smallbin_at(M,I) || (ok_address(M, F) && F->bk == P))) { \
-if (B == F) {\
-clear_smallmap(M, I);\
-}\
-else if (RTCHECK(B == smallbin_at(M,I) ||\
-(ok_address(M, B) && B->fd == P))) {\
-F->bk = B;\
-B->fd = F;\
-}\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-}\
-}\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-}\
+  mchunkptr F = P->fd;\
+  mchunkptr B = P->bk;\
+  bindex_t I = small_index(S);\
+  assert(P != B);\
+  assert(P != F);\
+  assert(chunksize(P) == small_index2size(I));\
+  if (RTCHECK(F == smallbin_at(M,I) || (ok_address(M, F) && F->bk == P))) { \
+    if (B == F) {\
+      clear_smallmap(M, I);\
+    }\
+    else if (RTCHECK(B == smallbin_at(M,I) ||\
+                     (ok_address(M, B) && B->fd == P))) {\
+      F->bk = B;\
+      B->fd = F;\
+    }\
+    else {\
+      CORRUPTION_ERROR_ACTION(M);\
+    }\
+  }\
+  else {\
+    CORRUPTION_ERROR_ACTION(M);\
+  }\
 }
 
 /* Unlink the first chunk from a smallbin */
 #define unlink_first_small_chunk(M, B, P, I) {\
-mchunkptr F = P->fd;\
-assert(P != B);\
-assert(P != F);\
-assert(chunksize(P) == small_index2size(I));\
-if (B == F) {\
-clear_smallmap(M, I);\
-}\
-else if (RTCHECK(ok_address(M, F) && F->bk == P)) {\
-F->bk = B;\
-B->fd = F;\
-}\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-}\
+  mchunkptr F = P->fd;\
+  assert(P != B);\
+  assert(P != F);\
+  assert(chunksize(P) == small_index2size(I));\
+  if (B == F) {\
+    clear_smallmap(M, I);\
+  }\
+  else if (RTCHECK(ok_address(M, F) && F->bk == P)) {\
+    F->bk = B;\
+    B->fd = F;\
+  }\
+  else {\
+    CORRUPTION_ERROR_ACTION(M);\
+  }\
 }
 
 /* Replace dv node, binning the old one */
 /* Used only when dvsize known to be small */
 #define replace_dv(M, P, S) {\
-size_t DVS = M->dvsize;\
-assert(is_small(DVS));\
-if (DVS != 0) {\
-mchunkptr DV = M->dv;\
-insert_small_chunk(M, DV, DVS);\
-}\
-M->dvsize = S;\
-M->dv = P;\
+  size_t DVS = M->dvsize;\
+  assert(is_small(DVS));\
+  if (DVS != 0) {\
+    mchunkptr DV = M->dv;\
+    insert_small_chunk(M, DV, DVS);\
+  }\
+  M->dvsize = S;\
+  M->dv = P;\
 }
 
 /* ------------------------- Operations on trees ------------------------- */
 
 /* Insert chunk into tree */
 #define insert_large_chunk(M, X, S) {\
-tbinptr* H;\
-bindex_t I;\
-compute_tree_index(S, I);\
-H = treebin_at(M, I);\
-X->index = I;\
-X->child[0] = X->child[1] = 0;\
-if (!treemap_is_marked(M, I)) {\
-mark_treemap(M, I);\
-*H = X;\
-X->parent = (tchunkptr)H;\
-X->fd = X->bk = X;\
-}\
-else {\
-tchunkptr T = *H;\
-size_t K = S << leftshift_for_tree_index(I);\
-for (;;) {\
-if (chunksize(T) != S) {\
-tchunkptr* C = &(T->child[(K >> (SIZE_T_BITSIZE-SIZE_T_ONE)) & 1]);\
-K <<= 1;\
-if (*C != 0)\
-T = *C;\
-else if (RTCHECK(ok_address(M, C))) {\
-*C = X;\
-X->parent = T;\
-X->fd = X->bk = X;\
-break;\
-}\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-break;\
-}\
-}\
-else {\
-tchunkptr F = T->fd;\
-if (RTCHECK(ok_address(M, T) && ok_address(M, F))) {\
-T->fd = F->bk = X;\
-X->fd = F;\
-X->bk = T;\
-X->parent = 0;\
-break;\
-}\
-else {\
-CORRUPTION_ERROR_ACTION(M);\
-break;\
-}\
-}\
-}\
-}\
+  tbinptr* H;\
+  bindex_t I;\
+  compute_tree_index(S, I);\
+  H = treebin_at(M, I);\
+  X->index = I;\
+  X->child[0] = X->child[1] = 0;\
+  if (!treemap_is_marked(M, I)) {\
+    mark_treemap(M, I);\
+    *H = X;\
+    X->parent = (tchunkptr)H;\
+    X->fd = X->bk = X;\
+  }\
+  else {\
+    tchunkptr T = *H;\
+    size_t K = S << leftshift_for_tree_index(I);\
+    for (;;) {\
+      if (chunksize(T) != S) {\
+        tchunkptr* C = &(T->child[(K >> (SIZE_T_BITSIZE-SIZE_T_ONE)) & 1]);\
+        K <<= 1;\
+        if (*C != 0)\
+          T = *C;\
+        else if (RTCHECK(ok_address(M, C))) {\
+          *C = X;\
+          X->parent = T;\
+          X->fd = X->bk = X;\
+          break;\
+        }\
+        else {\
+          CORRUPTION_ERROR_ACTION(M);\
+          break;\
+        }\
+      }\
+      else {\
+        tchunkptr F = T->fd;\
+        if (RTCHECK(ok_address(M, T) && ok_address(M, F))) {\
+          T->fd = F->bk = X;\
+          X->fd = F;\
+          X->bk = T;\
+          X->parent = 0;\
+          break;\
+        }\
+        else {\
+          CORRUPTION_ERROR_ACTION(M);\
+          break;\
+        }\
+      }\
+    }\
+  }\
 }
 
 /*
- Unlink steps:
- 
- 1. If x is a chained node, unlink it from its same-sized fd/bk links
- and choose its bk node as its replacement.
- 2. If x was the last node of its size, but not a leaf node, it must
- be replaced with a leaf node (not merely one with an open left or
- right), to make sure that lefts and rights of descendents
- correspond properly to bit masks.  We use the rightmost descendent
- of x.  We could use any other leaf, but this is easy to locate and
- tends to counteract removal of leftmosts elsewhere, and so keeps
- paths shorter than minimally guaranteed.  This doesn't loop much
- because on average a node in a tree is near the bottom.
- 3. If x is the base of a chain (i.e., has parent links) relink
- x's parent and children to x's replacement (or null if none).
- */
+  Unlink steps:
 
-#define unlink_large_chunk(M, X) { \
-tchunkptr XP = X->parent; \
-tchunkptr R; \
-if (X->bk != X) { \
-tchunkptr F = X->fd; \
-R = X->bk; \
-if (RTCHECK(ok_address(M, F) && F->bk == X && R->fd == X)) { \
-F->bk = R; \
-R->fd = F; \
-} \
-else { \
-CORRUPTION_ERROR_ACTION(M); \
-} \
-} \
-else { \
-tchunkptr* RP; \
-if (((R = *(RP = &(X->child[1]))) != 0) || \
-((R = *(RP = &(X->child[0]))) != 0)) { \
-tchunkptr* CP; \
-while ((*(CP = &(R->child[1])) != 0) || \
-(*(CP = &(R->child[0])) != 0)) { \
-R = *(RP = CP); \
-} \
-if (RTCHECK(ok_address(M, RP))) \
-*RP = 0; \
-else { \
-CORRUPTION_ERROR_ACTION(M); \
-} \
-} \
-} \
-if (XP != 0) { \
-tbinptr* H = treebin_at(M, X->index); \
-if (X == *H) { \
-if ((*H = R) == 0) \
-clear_treemap(M, X->index); \
-} \
-else if (RTCHECK(ok_address(M, XP))) { \
-if (XP->child[0] == X) \
-XP->child[0] = R; \
-else \
-XP->child[1] = R; \
-} \
-else \
-CORRUPTION_ERROR_ACTION(M); \
-if (R != 0) { \
-if (RTCHECK(ok_address(M, R))) { \
-tchunkptr C0, C1; \
-R->parent = XP; \
-if ((C0 = X->child[0]) != 0) { \
-if (RTCHECK(ok_address(M, C0))) { \
-R->child[0] = C0; \
-C0->parent = R; \
-} \
-else \
-CORRUPTION_ERROR_ACTION(M); \
-} \
-if ((C1 = X->child[1]) != 0) { \
-if (RTCHECK(ok_address(M, C1))) { \
-R->child[1] = C1; \
-C1->parent = R; \
-} \
-else \
-CORRUPTION_ERROR_ACTION(M); \
-} \
-} \
-else \
-CORRUPTION_ERROR_ACTION(M); \
-} \
-} \
+  1. If x is a chained node, unlink it from its same-sized fd/bk links
+     and choose its bk node as its replacement.
+  2. If x was the last node of its size, but not a leaf node, it must
+     be replaced with a leaf node (not merely one with an open left or
+     right), to make sure that lefts and rights of descendents
+     correspond properly to bit masks.  We use the rightmost descendent
+     of x.  We could use any other leaf, but this is easy to locate and
+     tends to counteract removal of leftmosts elsewhere, and so keeps
+     paths shorter than minimally guaranteed.  This doesn't loop much
+     because on average a node in a tree is near the bottom.
+  3. If x is the base of a chain (i.e., has parent links) relink
+     x's parent and children to x's replacement (or null if none).
+*/
+
+#define unlink_large_chunk(M, X) {\
+  tchunkptr XP = X->parent;\
+  tchunkptr R;\
+  if (X->bk != X) {\
+    tchunkptr F = X->fd;\
+    R = X->bk;\
+    if (RTCHECK(ok_address(M, F) && F->bk == X && R->fd == X)) {\
+      F->bk = R;\
+      R->fd = F;\
+    }\
+    else {\
+      CORRUPTION_ERROR_ACTION(M);\
+    }\
+  }\
+  else {\
+    tchunkptr* RP;\
+    if (((R = *(RP = &(X->child[1]))) != 0) ||\
+        ((R = *(RP = &(X->child[0]))) != 0)) {\
+      tchunkptr* CP;\
+      while ((*(CP = &(R->child[1])) != 0) ||\
+             (*(CP = &(R->child[0])) != 0)) {\
+        R = *(RP = CP);\
+      }\
+      if (RTCHECK(ok_address(M, RP)))\
+        *RP = 0;\
+      else {\
+        CORRUPTION_ERROR_ACTION(M);\
+      }\
+    }\
+  }\
+  if (XP != 0) {\
+    tbinptr* H = treebin_at(M, X->index);\
+    if (X == *H) {\
+      if ((*H = R) == 0) \
+        clear_treemap(M, X->index);\
+    }\
+    else if (RTCHECK(ok_address(M, XP))) {\
+      if (XP->child[0] == X) \
+        XP->child[0] = R;\
+      else \
+        XP->child[1] = R;\
+    }\
+    else\
+      CORRUPTION_ERROR_ACTION(M);\
+    if (R != 0) {\
+      if (RTCHECK(ok_address(M, R))) {\
+        tchunkptr C0, C1;\
+        R->parent = XP;\
+        if ((C0 = X->child[0]) != 0) {\
+          if (RTCHECK(ok_address(M, C0))) {\
+            R->child[0] = C0;\
+            C0->parent = R;\
+          }\
+          else\
+            CORRUPTION_ERROR_ACTION(M);\
+        }\
+        if ((C1 = X->child[1]) != 0) {\
+          if (RTCHECK(ok_address(M, C1))) {\
+            R->child[1] = C1;\
+            C1->parent = R;\
+          }\
+          else\
+            CORRUPTION_ERROR_ACTION(M);\
+        }\
+      }\
+      else\
+        CORRUPTION_ERROR_ACTION(M);\
+    }\
+  }\
 }
 
 /* Relays to large vs small bin operations */
 
-#define insert_chunk(M, P, S) \
-if (is_small(S)) insert_small_chunk(M, P, S) \
-else { tchunkptr TP = (tchunkptr)(P); insert_large_chunk(M, TP, S); }
+#define insert_chunk(M, P, S)\
+  if (is_small(S)) insert_small_chunk(M, P, S)\
+  else { tchunkptr TP = (tchunkptr)(P); insert_large_chunk(M, TP, S); }
 
-#define unlink_chunk(M, P, S) \
-if (is_small(S)) unlink_small_chunk(M, P, S) \
-else { tchunkptr TP = (tchunkptr)(P); unlink_large_chunk(M, TP); }
+#define unlink_chunk(M, P, S)\
+  if (is_small(S)) unlink_small_chunk(M, P, S)\
+  else { tchunkptr TP = (tchunkptr)(P); unlink_large_chunk(M, TP); }
 
 
 /* Relays to internal calls to malloc/free from realloc, memalign etc */
@@ -3836,9 +3846,9 @@ else { tchunkptr TP = (tchunkptr)(P); unlink_large_chunk(M, TP); }
 #else /* ONLY_MSPACES */
 #if MSPACES
 #define internal_malloc(m, b)\
-((m == gm)? dlmalloc(b) : mspace_malloc(m, b))
+  ((m == gm)? dlmalloc(b) : mspace_malloc(m, b))
 #define internal_free(m, mem)\
-if (m == gm) dlfree(mem); else mspace_free(m,mem);
+   if (m == gm) dlfree(mem); else mspace_free(m,mem);
 #else /* MSPACES */
 #define internal_malloc(m, b) dlmalloc(b)
 #define internal_free(m, mem) dlfree(mem)
@@ -4597,10 +4607,8 @@ void* dlmalloc(size_t bytes) {
      
      The ugly goto's here ensure that postaction occurs along all paths.
      */
-    
-#if USE_LOCKS
-    ensure_initialization(); /* initialize in sys_alloc if not using locks */
-#endif
+
+    ensure_initialization();
     
     if (!PREACTION(gm)) {
         void* mem;
@@ -4704,10 +4712,6 @@ void* dlmalloc(size_t bytes) {
         
     postaction:
         POSTACTION(gm);
-#if __EMSCRIPTEN__
-        /* XXX Emscripten Tracing API. */
-        emscripten_trace_record_allocation(mem, bytes);
-#endif
         return mem;
     }
     
@@ -4724,15 +4728,11 @@ void dlfree(void* mem) {
      */
     
     if (mem != 0) {
-#if __EMSCRIPTEN__
-        /* XXX Emscripten Tracing API. */
-        emscripten_trace_record_free(mem);
-#endif
         mchunkptr p  = mem2chunk(mem);
 #if FOOTERS
         mstate fm = get_mstate_for(p);
         if (!ok_magic(fm)) {
-            USAGE_ERROR_ACTION(fm, p);
+            __wasm_console_log_address("FREE: BAD MAGIC", (size_t)(&fm->magic));
             return;
         }
 #else /* FOOTERS */
@@ -4819,7 +4819,7 @@ void dlfree(void* mem) {
                 }
             }
         erroraction:
-            USAGE_ERROR_ACTION(fm, p);
+            __wasm_console_log_address("FREE: FALLTHROUGH ERROR", (size_t)mem); return;
         postaction:
             POSTACTION(fm);
         }
@@ -5264,10 +5264,6 @@ void* dlrealloc(void* oldmem, size_t bytes) {
                 }
             }
         }
-#if __EMSCRIPTEN__
-        /* XXX Emscripten Tracing API. */
-        emscripten_trace_record_reallocation(oldmem, mem, bytes);
-#endif
     }
     return mem;
 }
@@ -6023,8 +6019,8 @@ int mspace_mallopt(int param_number, int value) {
 // and dlfree from this file.
 // This allows an easy mechanism for hooking into memory allocation.
 #if defined(__EMSCRIPTEN__) && !ONLY_MSPACES
-extern __typeof(malloc) emscripten_builtin_malloc __attribute__((weak, alias("malloc")));
-extern __typeof(free) emscripten_builtin_free __attribute__((weak, alias("free")));
+//extern __typeof(malloc) emscripten_builtin_malloc __attribute__((weak, alias("malloc")));
+//extern __typeof(free) emscripten_builtin_free __attribute__((weak, alias("free")));
 #endif
 
 /* -------------------- Alternative MORECORE functions ------------------- */

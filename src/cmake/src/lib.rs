@@ -104,6 +104,27 @@ impl Invocation {
     self.append_str("CMAKE_CXX_FLAGS", value);
     self
   }
+  pub fn shared_ld_flag<U>(&mut self, value: U) -> &mut Self
+    where U: AsRef<str>,
+  {
+    self.append_str("CMAKE_SHARED_LINKER_FLAGS",
+                    value.as_ref());
+    self
+  }
+  pub fn static_ld_flag<U>(&mut self, value: U) -> &mut Self
+    where U: AsRef<str>,
+  {
+    self.append_str("CMAKE_STATIC_LINKER_FLAGS",
+                    value.as_ref());
+    self
+  }
+  pub fn exe_ld_flag<U>(&mut self, value: U) -> &mut Self
+    where U: AsRef<str>,
+  {
+    self.append_str("CMAKE_EXE_LINKER_FLAGS",
+                    value.as_ref());
+    self
+  }
 
   pub fn generator<K>(&mut self, gen: K) -> &mut Self
     where K: Into<String>,
@@ -143,6 +164,7 @@ impl Tool for Invocation {
                     self.tc.binaryen_tool("wasm-shell").display()));
     cmd.args(self.args.iter());
     cmd.arg("-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON");
+    cmd.arg("-DWASM:BOOL=ON");
     cmd.env("WASM_TC_CMAKE_MODULE_PATH", toolchain_file);
 
     for (key, value) in self.defines.iter() {

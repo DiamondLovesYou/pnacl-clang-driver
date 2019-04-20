@@ -134,7 +134,7 @@ impl<T, U> ICommand<U> for Command<CommandTool<T>>
 {
   fn run(&mut self, _: &mut &mut U,
          state: &mut RunState) -> Result<(), CommandQueueError> {
-    println!("on command: {:?} => {:?}", self.name, self.cmd);
+    info!("on command: {:?} => {:?}", self.name, self.cmd);
 
     let mut out = state.output(&self.intermediate_name);
 
@@ -158,7 +158,7 @@ impl<T, U> ICommand<U> for Command<CommandTool<T>>
       CommandQueue::new(o)
     };
 
-    println!("output: {}", out.display());
+    info!("output: {}", out.display());
 
     self.cmd.enqueue_commands(&mut queue)?;
     queue.run_all(&mut self.cmd)?;
@@ -174,7 +174,7 @@ impl<T> ICommand<T> for Command<FunctionCommand<T>>
 {
   fn run(&mut self, invoc: &mut &mut T,
          _state: &mut RunState) -> Result<(), CommandQueueError> {
-    println!("on command: {:?} => {:?}", self.name, self.cmd);
+    info!("on command: {:?} => {:?}", self.name, self.cmd);
 
     let f = self.cmd.0.take().unwrap();
     Ok(FnBox::call_box(f, (invoc,))?)
@@ -186,7 +186,7 @@ impl<T> ICommand<T> for Command<FunctionCommandWithState<T>>
 {
   fn run(&mut self, invoc: &mut &mut T,
          state: &mut RunState) -> Result<(), CommandQueueError> {
-    println!("on command: {:?} => {:?}", self.name, self.cmd);
+    info!("on command: {:?} => {:?}", self.name, self.cmd);
 
     let f = self.cmd.0.take().unwrap();
     Ok(FnBox::call_box(f, (invoc, state))?)
@@ -216,9 +216,9 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
           InputArgsTransformResult::Normal => {},
         }
 
-        println!("on command: {:?} => {:?}", self.name, self.cmd);
+        info!("on command: {:?} => {:?}", self.name, self.cmd);
       } else {
-        println!("on command: {:?} => {:?}", self.name, self.cmd);
+        info!("on command: {:?} => {:?}", self.name, self.cmd);
 
         for prev in state.prev_outputs.drain(..) {
           self.cmd.0.arg(prev);
@@ -226,7 +226,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
       }
     }
 
-    println!("output: {}", out.display());
+    info!("output: {}", out.display());
 
 
     if let Some(ref out_arg) = self.cmd.1 {
@@ -240,7 +240,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
       let result = child.wait()?;
 
       if !cant_fail && !result.success() {
-        println!("command failed!");
+        error!("command failed!");
         return Err(CommandQueueError::ProcessError(result.code()));
       }
     } else {
@@ -248,7 +248,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
       let result = child.wait()?;
 
       if !cant_fail && !result.success() {
-        println!("command failed!");
+        error!("command failed!");
         return Err(CommandQueueError::ProcessError(result.code()));
       }
     }
@@ -260,7 +260,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
   fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
 }
 
-pub trait ICommand<T> {
+pub trait ICommand<T>: Debug {
   fn run(&mut self, invoc: &mut &mut T,
          state: &mut RunState) -> Result<(), CommandQueueError>;
   fn concrete(&mut self) -> &mut ConcreteCommand;
@@ -336,7 +336,7 @@ impl From<std::io::Error> for CommandQueueError {
     CommandQueueError::Error(From::from(v))
   }
 }
-
+#[derive(Debug)]
 pub struct CommandQueue<T> {
   pub final_output: Option<PathBuf>,
 
@@ -352,10 +352,14 @@ impl<T> CommandQueue<T>
     CTRL_C_HANDLER.call_once(|| {
       use ctrlc::set_handler;
       let r = set_handler(|| {
+        if STOP_BEFORE_NEXT_JOB.load(Ordering::SeqCst) {
+          // exit now.
+          ::std::process::exit(1);
+        }
         STOP_BEFORE_NEXT_JOB.store(true, Ordering::SeqCst);
       });
       if r.is_err() {
-        println!("Couldn't set ctrl-c handler");
+        warn!("Couldn't set ctrl-c handler");
       }
     });
 

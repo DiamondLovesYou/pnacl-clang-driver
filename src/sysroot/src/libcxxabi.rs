@@ -14,7 +14,7 @@ impl Invocation {
     super::get_system_dir()
       .join("libcxxabi")
   }
-  pub fn build_libcxxabi(&self, mut queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
+  pub fn build_libcxxabi(&self, queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
     use std::process::Command;
     use tempdir::TempDir;
 
@@ -44,11 +44,11 @@ impl Invocation {
     let mut cmake = cmake_driver::Invocation::default();
     cmake.override_output(libcxxabi_build.clone());
     cmake
-      .cmake_off("LIBCXXABI_USE_LLVM_UNWINDER")
       .cmake_on("LIBCXXABI_USE_COMPILER_RT")
       .cmake_on("LLVM_ENABLE_LIBCXX")
       .cmake_on("LIBCXXABI_ENABLE_SHARED")
       .cmake_on("LIBCXXABI_ENABLE_THREADS")
+      .cmake_off("LIBCXXABI_USE_LLVM_UNWINDER")
       .cmake_off("LIBCXXABI_ENABLE_EXCEPTIONS")
       .cmake_str("LIBCXXABI_TARGET_TRIPLE", "wasm32-unknown-unknown-wasm")
       .cmake_path("LIBCXXABI_SYSROOT", &sysroot)
@@ -63,7 +63,8 @@ impl Invocation {
       .cmake_path("LIBCXXABI_LIBCXX_PATH", libcxx)
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
-      .c_cxx_flag(self.c_cxx_linker_args())
+      .c_cxx_flag("-O3")
+      .c_cxx_flag(self.c_cxx_linker_cflags())
       .c_cxx_flag("-D_LIBCPP_HAS_THREAD_API_PTHREAD")
       .c_cxx_flag(format!("-I{}", self.libunwind_src().join("include").display()))
       .generator("Ninja");

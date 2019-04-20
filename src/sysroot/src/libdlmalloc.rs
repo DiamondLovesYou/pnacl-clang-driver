@@ -1,4 +1,4 @@
-use super::{Invocation};
+use super::{Invocation, get_system_dir, };
 use util::{CommandQueue};
 
 use clang_driver;
@@ -10,44 +10,46 @@ const FILES: &'static [&'static str] = &[
   "dlmalloc.c",
 ];
 
-pub fn build_cc(invoc: &Invocation,
-                file: &'static str,
-                queue: &mut &mut CommandQueue<Invocation>)
-{
-  let full_file = invoc.tc.emscripten
-    .join("system/lib")
-    .join(file);
+impl Invocation {
+  fn build_cc(&self,
+              file: &'static str,
+              queue: &mut &mut CommandQueue<Invocation>)
+    -> Result<(), Box<Error>>
+  {
+    let full_file = get_system_dir().join(file);
 
-  let mut clang = clang_driver::Invocation::default();
-  clang.driver_mode = clang_driver::DriverMode::CC;
-  let mut args = Vec::new();
-  args.push("-c".to_string());
-  args.push(format!("{}", full_file.display()));
+    let mut clang = clang_driver::Invocation::default();
+    clang.driver_mode = clang_driver::DriverMode::CC;
 
-  let out_file = format!("{}.obj", file);
-  let out_file = Path::new(&out_file).to_path_buf();
+    let mut args = Vec::new();
+    args.push(format!("-isystem{}", self.musl_include_dir().display()));
+    args.push("-c".to_string());
+    args.push(format!("{}", full_file.display()));
 
-  args.push("-Oz".to_string());
-  super::add_default_args(&mut args);
+    let out_file = self.dlmalloc_obj_output()?;
 
-  let cmd = queue
-    .enqueue_tool(Some("clang"),
-                  clang, args, false,
-                  None::<Vec<::tempdir::TempDir>>)
-    .expect("internal error: bad clang arguments");
-  cmd.prev_outputs = false;
-  cmd.output_override = true;
-  cmd.intermediate_name = Some(out_file);
-}
+    args.push("-O3".to_string());
+    super::add_default_args(&mut args);
 
-pub fn build(invoc: &Invocation,
-             mut queue: &mut CommandQueue<Invocation>)
-  -> Result<(), Box<Error>>
-{
-  for file in FILES.iter() {
-    build_cc(invoc,
-              file,
-              &mut queue);
+    let cmd = queue
+      .enqueue_tool(Some("clang"),
+                    clang, args, false,
+                    None::<Vec<::tempdir::TempDir>>)
+      .expect("internal error: bad clang arguments");
+    cmd.prev_outputs = false;
+    cmd.output_override = true;
+    cmd.intermediate_name = Some(out_file);
+
+    Ok(())
   }
-  Ok(())
+
+  pub fn build_dlmalloc(&self, mut queue: &mut CommandQueue<Invocation>)
+    -> Result<(), Box<Error>>
+  {
+    assert_eq!(FILES.len(), 1, "XXX dlmalloc will probably be a single file forever tho");
+    for file in FILES.iter() {
+      self.build_cc(file, &mut queue)?;
+    }
+    Ok(())
+  }
 }

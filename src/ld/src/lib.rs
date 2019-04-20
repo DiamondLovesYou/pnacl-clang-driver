@@ -53,7 +53,9 @@ pub struct Invocation {
 
   output: Option<PathBuf>,
 
-  entry: Option<String>,
+  pub entry: Option<String>,
+  /// symbols which should be force-exported.
+  pub exports: Vec<String>,
   global_base: Option<usize>,
   pub import_memory: bool,
   pub import_table: bool,
@@ -116,6 +118,7 @@ impl Default for Invocation {
       output: Default::default(),
 
       entry: None,
+      exports: Default::default(),
       global_base: None,
       import_memory: false,
       import_table: false,
@@ -247,7 +250,8 @@ impl Invocation {
   /// Add a non-flag input.
   pub fn add_input(&mut self, input: Input) -> Result<(), Box<Error>> {
     use util::ldtools::*;
-    let expanded = expand_input(input, &self.search_paths[..], false)?;
+    let expanded = expand_input(input, &self.search_paths[..],
+                                self.static_input)?;
     'outer: for input in expanded.into_iter() {
       let into = 'inner: loop {
         let _file: &PathBuf = match &input {
@@ -272,8 +276,6 @@ impl Invocation {
   }
 
   fn check_native_allowed(&self) -> Result<(), Box<Error>> {
-    // this is a panic for debugging purposes.
-    // TODO this should probably not be a panic.
     Err("native code is never allowed".into())
   }
 
@@ -284,7 +286,7 @@ impl Invocation {
     Ok(())
   }
   pub fn add_trans_flag(&mut self, flag: &str) -> Result<(), Box<Error>> {
-    try!(self.check_native_allowed());
+    self.check_native_allowed()?;
 
     self.trans_flags.push(flag.to_string());
     Ok(())
@@ -338,7 +340,8 @@ impl util::ToolInvocation for Invocation {
           STRIP_ALL_FLAG,
           STRIP_DEBUG_FLAG,
           LIBRARY,
-          GC_SECTIONS_FLAG,
+          GC_SECTIONS,
+          MERGE_DATA_SEGMENTS,
           AS_NEEDED_FLAG,
           GROUP_FLAG,
           WHOLE_ARCHIVE_FLAG,
@@ -350,6 +353,8 @@ impl util::ToolInvocation for Invocation {
           RELOCATABLE,
           VERBOSE,
           GROWABLE_TABLE_IMPORT,
+          VERSION_SCRIPT,
+          EXPORT,
           UNDEFINED,
           UNSUPPORTED,
         ]),
@@ -366,8 +371,12 @@ impl util::Tool for Invocation {
     use std::process::Command;
 
     let mut cmd = Command::new(self.tc.llvm_tool("wasm-ld"));
+    cmd.arg("--modkit-loader");
+
     if self.relocatable {
       cmd.arg("--relocatable");
+    } else if self.entry.is_none() {
+      cmd.arg("--no-entry");
     }
     cmd.args(&self.ld_flags);
     if let Some(ref entry) = self.entry {
@@ -397,6 +406,13 @@ impl util::Tool for Invocation {
       util::StripMode::All => {
         cmd.arg("--strip-all");
       },
+    }
+    if self.lto {
+      let lvl = self.optimize.unwrap();
+      cmd.arg(format!("-lto{}", lvl));
+    }
+    for export in self.exports.iter() {
+      cmd.arg(format!("--export={}", export));
     }
     for input in self.bitcode_inputs.iter() {
       match input {
@@ -433,6 +449,12 @@ impl util::Tool for Invocation {
         _ => {},
       }
       cmd.arg(format!("{}", input));
+    }
+
+    if !self.relocatable {
+      // even in static mode, there will be functions which are provided by
+      // the runner.
+      cmd.arg("--allow-undefined");
     }
 
     let output = if self.emit_wast { self.output.take() } else { None };
@@ -556,6 +578,40 @@ tool_argument! {
     this.growable_table_import = b;
   }
 }
+tool_argument! {
+  pub VERSION_SCRIPT: Invocation = single_and_split_abs_path(_path) "version-script" =>
+  fn verion_script(_this) {
+    // ignore this
+  }
+}
+tool_argument! {
+  pub EXPORT: Invocation = single_and_split_from_str(symbol) "export" =>
+  fn force_export_arg(this) {
+    this.exports.push(symbol);
+  }
+}
+tool_argument! {
+  pub GC_SECTIONS: Invocation = simple_no_flag(b) "gc-sections" =>
+  fn gc_sections_flag(this) {
+    let input = if b {
+      "--gc-sections"
+    } else {
+      "--no-gc-sections"
+    };
+    this.bitcode_inputs.push(Input::Flag(input.into()));
+  }
+}
+tool_argument! {
+  pub MERGE_DATA_SEGMENTS: Invocation = simple_no_flag(b) "merge-data-segments" =>
+  fn merge_data_segments_flag(this) {
+    let input = if b {
+      "--merge-data-segments"
+    } else {
+      "--no-merge-data-segments"
+    };
+    this.bitcode_inputs.push(Input::Flag(input.into()));
+  }
+}
 
 tool_argument!(SEARCH_PATH: Invocation = { Some(r"^-L(.+)$"), Some(r"^-(L|-library-path)$") };
                fn add_search_path(this, single, cap) {
@@ -585,11 +641,6 @@ tool_argument!(SONAME: Invocation = { Some(r"-?-soname=(.+)"), Some(r"-?-soname"
 argument!(impl Z_FLAGS where { None, Some(r"^-z$") } for Invocation {
     fn z_flags(_this, _single, _cap) {
       // TODO
-    }
-});
-
-argument!(impl GC_SECTIONS_FLAG where { Some(r"^--(no-)?gc-sections$"), None } for Invocation {
-    fn gc_sections_arg(_this, _single, _cap) {
     }
 });
 

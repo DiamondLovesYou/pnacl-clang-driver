@@ -1,4 +1,5 @@
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::error::Error;
@@ -8,6 +9,7 @@ use std::str::FromStr;
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue,
            CreateIfNotExists};
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
+use std::fs::remove_file;
 
 pub mod libc;
 pub mod libcxx;
@@ -16,6 +18,7 @@ pub mod libunwind;
 pub mod libdlmalloc;
 pub mod compiler_rt;
 pub mod compat;
+pub mod zlib;
 
 extern crate regex;
 #[macro_use]
@@ -23,6 +26,7 @@ extern crate util;
 #[macro_use]
 extern crate lazy_static;
 extern crate tempdir;
+extern crate dirs;
 
 extern crate clang_driver;
 extern crate cmake_driver;
@@ -53,6 +57,7 @@ pub struct Invocation {
   clobber_libcxx_build: bool,
   clobber_libc_build: bool,
   clobber_compiler_rt_build: bool,
+  clobber_zlib_build: bool,
 
   pub emit_wast: bool,
   pub emit_wasm: bool,
@@ -67,10 +72,43 @@ impl Invocation {
     self.llvm_src.as_ref()
       .expect("Need `--llvm-src`")
   }
+  pub fn c_cxx_linker_args(&self) -> Vec<Cow<'static, str>> {
+    let mut v = vec![
+      Cow::Borrowed("--growable-table-import"),
+    ];
 
-  pub fn c_cxx_linker_args(&self) -> String {
-    format!("-Wl,--relocatable,--import-table,--import-memory,--growable-table-import{}",
-            if self.emit_wast { ",--emit-wast" } else { "" })
+    if self.emit_wast {
+      v.push(Cow::Borrowed("--emit-wast"));
+    }
+
+    v
+  }
+  pub fn c_cxx_linker_cflags(&self) -> String {
+    let args = self.c_cxx_linker_args();
+    if args.len() == 0 { return Default::default(); }
+
+    let mut out = "-Wl,".to_string();
+    for (idx, arg) in args.into_iter().enumerate() {
+      if idx != 0 {
+        out.push_str(",");
+      }
+      out.push_str(arg.as_ref());
+    }
+
+    out
+  }
+
+  pub fn cxx(&self) -> PathBuf {
+    dirs::home_dir()
+      .expect("need a $HOME")
+      .join(".cargo/bin")
+      .join("wasm-clangxx")
+  }
+  pub fn cc(&self) -> PathBuf {
+    dirs::home_dir()
+      .expect("need a $HOME")
+      .join(".cargo/bin")
+      .join("wasm-clang")
   }
 }
 impl Default for Invocation {
@@ -88,6 +126,7 @@ impl Default for Invocation {
       clobber_libcxx_build: false,
       clobber_libc_build: false,
       clobber_compiler_rt_build: false,
+      clobber_zlib_build: false,
 
       tc: WasmToolchain::default(),
 
@@ -105,6 +144,8 @@ pub enum SystemLibrary {
   LibCxxAbi,
   LibUnwind,
   CompilerRt,
+  DlMalloc,
+  Zlib,
 }
 impl SystemLibrary { }
 
@@ -118,6 +159,8 @@ impl FromStr for SystemLibrary {
       "libunwind" => Ok(SystemLibrary::LibUnwind),
       "compiler-rt" => Ok(SystemLibrary::CompilerRt),
       "compat" => Ok(SystemLibrary::Compat),
+      "dlmalloc" => Ok(SystemLibrary::DlMalloc),
+      "zlib" => Ok(SystemLibrary::Zlib),
       _ => {
         Err(format!("unknown system library: {}", s))?
       },
@@ -132,7 +175,9 @@ impl PartialOrd for SystemLibrary {
       (&SystemLibrary::LibCxx, &SystemLibrary::LibCxx) |
       (&SystemLibrary::LibCxxAbi, &SystemLibrary::LibCxxAbi) |
       (&SystemLibrary::LibUnwind, &SystemLibrary::LibUnwind) |
-      (&SystemLibrary::Compat, &SystemLibrary::Compat) =>
+      (&SystemLibrary::Compat, &SystemLibrary::Compat) |
+      (&SystemLibrary::DlMalloc, &SystemLibrary::DlMalloc) |
+      (&SystemLibrary::Zlib, &SystemLibrary::Zlib) =>
         Ordering::Equal,
 
       (&SystemLibrary::Compat, _) => Ordering::Less,
@@ -140,6 +185,13 @@ impl PartialOrd for SystemLibrary {
       (&SystemLibrary::CompilerRt,
         &SystemLibrary::Compat) => Ordering::Greater,
       (&SystemLibrary::CompilerRt,
+        _) => Ordering::Less,
+
+      (&SystemLibrary::DlMalloc,
+        &SystemLibrary::Compat) |
+      (&SystemLibrary::DlMalloc,
+        &SystemLibrary::CompilerRt) => Ordering::Greater,
+      (&SystemLibrary::DlMalloc,
         _) => Ordering::Less,
 
       (&SystemLibrary::LibC,
@@ -162,6 +214,8 @@ impl PartialOrd for SystemLibrary {
       (&SystemLibrary::LibCxxAbi,
         &SystemLibrary::LibC) |
       (&SystemLibrary::LibCxxAbi,
+        &SystemLibrary::DlMalloc) |
+      (&SystemLibrary::LibCxxAbi,
         &SystemLibrary::CompilerRt) |
       (&SystemLibrary::LibCxxAbi,
         &SystemLibrary::Compat) => Ordering::Greater,
@@ -169,6 +223,11 @@ impl PartialOrd for SystemLibrary {
         _) => Ordering::Less,
 
       (&SystemLibrary::LibCxx,
+        &SystemLibrary::Zlib) => Ordering::Less,
+      (&SystemLibrary::LibCxx,
+        _) => Ordering::Greater,
+
+      (&SystemLibrary::Zlib,
         _) => Ordering::Greater,
     };
 
@@ -189,13 +248,16 @@ impl Tool for Invocation {
     libraries.sort();
     self.libraries.clear();
     self.libraries_set.clear();
+
+    let mut dlmalloc_built = false;
+
     for syslib in libraries.into_iter() {
       match syslib {
         SystemLibrary::Compat => {
           self.build_compat(queue)?;
         },
         SystemLibrary::LibC => {
-          self.build_musl(queue)?;
+          self.build_musl(queue, &mut dlmalloc_built)?;
         },
         SystemLibrary::LibCxx => {
           self.build_libcxx(queue)?;
@@ -205,9 +267,16 @@ impl Tool for Invocation {
         },
         SystemLibrary::LibUnwind => {
           self.build_libunwind(queue)?;
-        }
+        },
         SystemLibrary::CompilerRt => {
           compiler_rt::build(self, queue)?;
+        },
+        SystemLibrary::DlMalloc => {
+          self.build_dlmalloc(queue)?;
+          dlmalloc_built = true;
+        },
+        SystemLibrary::Zlib => {
+          self.build_zlib(queue)?;
         },
       }
     }
@@ -282,6 +351,7 @@ impl ToolInvocation for Invocation {
         CLOBBER_LIBCXX_BUILD,
         CLOBBER_LIBC_BUILD,
         CLOBBER_COMPILER_RT_BUILD,
+        CLOBBER_ZLIB_BUILD,
         CLOBBER_ALL_BUILDS,
       ]),
       _ => return None,
@@ -294,7 +364,7 @@ impl ToolInvocation for Invocation {
 pub fn add_default_args(args: &mut Vec<String>) {
   args.push("-fno-slp-vectorize".to_string());
   args.push("-fno-vectorize".to_string());
-  args.push("-fPIC".to_string());
+  //args.push("-fPIC".to_string());
 }
 
 pub fn link(invoc: &Invocation,
@@ -304,38 +374,87 @@ pub fn link(invoc: &Invocation,
   -> Result<PathBuf, Box<Error>>
 {
   use std::process::Command;
-  let out_name = format!("{}.so", out_name);
+
+  let reloc_out_name = format!("{}.so", out_name);
   let out = invoc.tc.sysroot_cache()
     .join("lib")
     .create_if_not_exists()?
-    .join(&out_name);
-  let mut args = Vec::new();
-  args.push("-o".to_string());
-  args.push(format!("{}", out.display()));
+    .join(&reloc_out_name);
 
-  let mut linker = ld_driver::Invocation::default();
-  linker.emit_wast = invoc.emit_wast;
-  linker.emit_wasm = invoc.emit_wasm;
-  linker.optimize = Some(util::OptimizationGoal::Size);
-  linker.relocatable = true;
-  linker.import_memory = true;
-  linker.import_table = true;
-  linker.growable_table_import = true;
-  let libname = out_name[..out_name.len() - 3].to_string();
-  linker.s2wasm_libname = Some(libname);
-  linker.add_search_path(invoc.tc.sysroot_cache().join("lib"));
-  for &lib in s2wasm_libs.iter() {
-    linker.add_library(lib, false)?;
-  }
-
+  let out_f = out.clone();
+  let out_name = out_name.to_string();
+  let s2wasm_libs: Vec<String> = s2wasm_libs
+    .iter()
+    .map(|&s| s.to_owned() )
+    .collect();
   let cmd = queue
-    .enqueue_tool(Some("link"),
-                  linker, args,
-                  false,
-                  None::<Vec<::tempdir::TempDir>>)?;
+    .enqueue_state_function(Some("link/archive"), move |invoc, state| {
+      let out = out_f;
+      let mut queue = CommandQueue::new(None);
+      let prev_outputs = &state.prev_outputs[..];
 
+      let mut args = Vec::new();
+      args.push("-o".to_string());
+      args.push(format!("{}", out.display()));
+
+      let mut linker = ld_driver::Invocation::default();
+      linker.emit_wast = invoc.emit_wast;
+      linker.emit_wasm = invoc.emit_wasm;
+      linker.optimize = Some(util::OptimizationGoal::Size);
+      linker.relocatable = true;
+      linker.import_memory = true;
+      linker.import_table = true;
+      linker.growable_table_import = true;
+      let libname = out_name[..out_name.len() - 3].to_string();
+      linker.s2wasm_libname = Some(libname);
+      for input in prev_outputs.iter().cloned() {
+        let input = ld_driver::Input::File(input);
+        linker.add_input(input)?;
+      }
+      linker.add_search_path(invoc.tc.sysroot_cache().join("lib"));
+      for lib in s2wasm_libs.iter() {
+        linker.add_library(lib, false)?;
+      }
+
+      {
+        let cmd = queue
+          .enqueue_tool(Some("link"),
+                        linker, args,
+                        false,
+                        None::<Vec<::tempdir::TempDir>>)?;
+
+        cmd.prev_outputs = false;
+        cmd.output_override = false;
+      }
+
+      let static_out_name = format!("{}.a", out_name);
+      let out = invoc.tc.sysroot_cache()
+        .join("lib")
+        .create_if_not_exists()?
+        .join(&static_out_name);
+
+      remove_file(&out)?;
+
+      let ar = invoc.tc.llvm_tool("llvm-ar");
+      let mut ar = Command::new(ar);
+      ar.arg("crs")
+        .arg(out)
+        .args(prev_outputs);
+
+      {
+        let cmd = queue
+          .enqueue_simple_external(Some("archive"),
+                                   ar, None);
+
+        cmd.prev_outputs = false;
+        cmd.output_override = false;
+      }
+
+      queue.run_all(*invoc)
+    });
   cmd.prev_outputs = true;
   cmd.output_override = false;
+
 
   Ok(out)
 }
@@ -387,6 +506,12 @@ tool_argument! {
     this.clobber_compiler_rt_build = b;
   }
 }
+tool_argument! {
+  pub CLOBBER_ZLIB_BUILD: Invocation = simple_no_flag(b) "clobber-zlib-build" =>
+  fn clobber_zlib_build_arg(this) {
+    this.clobber_zlib_build = b;
+  }
+}
 
 tool_argument! {
   pub CLOBBER_ALL_BUILDS: Invocation = simple_no_flag(b) "clobber-all-builds" =>
@@ -396,6 +521,7 @@ tool_argument! {
     this.clobber_libcxx_build = b;
     this.clobber_libc_build = b;
     this.clobber_compiler_rt_build = b;
+    this.clobber_zlib_build = b;
   }
 }
 
