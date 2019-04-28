@@ -584,7 +584,7 @@ BASIC OPTIONS:
           let out = this.get_output();
           let mut cmd = Command::new("sh");
           cmd.arg("-c")
-            .arg(r#"echo "$0 $1 | c++filt > ${1%.*}.wast"#)
+            .arg(r#"$0 $1 | c++filt > ${1%.*}.wast"#)
             .arg(wasm_dis)
             .arg(out);
 
