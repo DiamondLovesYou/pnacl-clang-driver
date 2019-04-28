@@ -1,9 +1,0 @@
-
-[workspace]
-members = ["src/clang", "src/ld", "src/cmake",
-           "src/sysroot",
-           "src/util"]
-
-[profile.release]
-debug = true
-debug-assertions = true
