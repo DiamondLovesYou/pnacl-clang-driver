@@ -28,7 +28,7 @@ impl Invocation {
 
     let out_file = self.dlmalloc_obj_output()?;
 
-    args.push("-O3".to_string());
+    args.push("-O1".to_string());
     super::add_default_args(&mut args);
 
     let cmd = queue
