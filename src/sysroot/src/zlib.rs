@@ -49,7 +49,7 @@ impl Invocation {
     let install_dir = self.tc.sysroot_cache()
       .create_if_not_exists()?;
 
-    let mut cflags = vec![self.c_cxx_linker_cflags()];
+    let mut cflags = vec![self.c_cxx_linker_cflags(), "-Os".into(), ];
 
     if self.emit_wast {
       cflags.push("--emit-wast".into());
