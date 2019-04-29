@@ -101,6 +101,7 @@ EXTRA_OBJS := {}
 
     if !*dlmalloc_built {
       self.build_dlmalloc(queue)?;
+      *dlmalloc_built = true;
     }
 
     let mut cmd = Command::new("make");
