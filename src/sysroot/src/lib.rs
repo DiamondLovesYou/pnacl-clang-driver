@@ -197,7 +197,9 @@ impl PartialOrd for SystemLibrary {
       (&SystemLibrary::LibC,
         &SystemLibrary::CompilerRt) |
       (&SystemLibrary::LibC,
-        &SystemLibrary::Compat) => Ordering::Greater,
+        &SystemLibrary::Compat) |
+      (&SystemLibrary::LibC,
+        &SystemLibrary::DlMalloc) => Ordering::Greater,
       (&SystemLibrary::LibC,
         _) => Ordering::Less,
 
