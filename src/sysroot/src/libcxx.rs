@@ -10,8 +10,15 @@ use std::path::{Path, PathBuf};
 
 impl Invocation {
   pub fn libcxx_src(&self) -> PathBuf {
-    super::get_system_dir()
-      .join("libcxx")
+    self.srcs.join(self.libcxx_repo.name.as_ref())
+  }
+  pub fn checkout_libcxx(&mut self) -> Result<(), Box<Error>> {
+    if self.libcxx_checkout { return Ok(()); }
+    self.libcxx_checkout = true;
+
+    self.checkout_libcxxabi()?;
+
+    self.libcxx_repo.checkout_thin(self.libcxx_src())
   }
   pub fn build_libcxx(&self, queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
     use std::process::Command;
@@ -32,14 +39,13 @@ impl Invocation {
     let libcxx = self.libcxx_src();
     let libcxxabi = self.libcxxabi_src();
 
-    let libcxx_build = super::get_system_dir()
+    let libcxx_build = self.srcs
       .join("libcxx-build")
       .create_if_not_exists()?;
 
-    let sysroot = self.tc.sysroot_cache();
+    let sysroot = self.tc().sysroot_cache();
 
-    let mut cmake = cmake_driver::Invocation::default();
-    cmake.override_output(libcxx_build.clone());
+    let mut cmake = cmake_driver::Invocation::with_toolchain(self, libcxx_build.clone())?;
     cmake
       .cmake_on("LIBCXX_USE_COMPILER_RT")
       .cmake_on("LIBCXX_HAS_MUSL_LIBC")
@@ -87,8 +93,9 @@ impl Invocation {
     let mut cmd = Command::new("ninja");
     cmd.current_dir(libcxx_build)
       .arg("install");
+    self.tc().set_envs(&mut cmd);
 
-    queue.enqueue_external(None, cmd, None,
+    queue.enqueue_external(Some("install libc++"), cmd, None,
                            false, None::<Vec<TempDir>>);
     Ok(())
   }

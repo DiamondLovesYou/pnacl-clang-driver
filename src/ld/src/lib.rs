@@ -3,9 +3,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use util::{Arch, CommandQueue};
+use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
 pub use util::ldtools::{Input, AllowedTypes};
-use util::toolchain::WasmToolchain;
 
 extern crate regex;
 #[macro_use] extern crate util;
@@ -78,8 +78,14 @@ pub struct Invocation {
 
 impl Default for Invocation {
   fn default() -> Invocation {
+    Self::new_with_toolchain(Default::default())
+  }
+}
+
+impl Invocation {
+  pub fn new_with_toolchain(tc: WasmToolchain) -> Self {
     Invocation {
-      tc: WasmToolchain::new(),
+      tc,
       allow_native: false,
       use_irt: true,
       abi_check: true,
@@ -138,9 +144,12 @@ impl Default for Invocation {
       grouped: 0,
     }
   }
-}
-
-impl Invocation {
+  pub fn with_toolchain<T>(tool: &T) -> Self
+    where T: WasmToolchainTool,
+  {
+    let tc = tool.wasm_toolchain().clone();
+    Self::new_with_toolchain(tc)
+  }
   pub fn get_static(&self) -> bool {
     !self.relocatable
   }

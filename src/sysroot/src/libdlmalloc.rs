@@ -18,11 +18,12 @@ impl Invocation {
   {
     let full_file = get_system_dir().join(file);
 
-    let mut clang = clang_driver::Invocation::default();
+    let mut clang = clang_driver::Invocation::with_toolchain(self);
     clang.driver_mode = clang_driver::DriverMode::CC;
 
+    self.musl_includes(&mut clang);
+
     let mut args = Vec::new();
-    args.push(format!("-isystem{}", self.musl_include_dir().display()));
     args.push("-c".to_string());
     args.push(format!("{}", full_file.display()));
 
@@ -43,9 +44,11 @@ impl Invocation {
     Ok(())
   }
 
-  pub fn build_dlmalloc(&self, mut queue: &mut CommandQueue<Invocation>)
+  pub fn build_dlmalloc(&mut self, mut queue: &mut CommandQueue<Invocation>)
     -> Result<(), Box<Error>>
   {
+    self.configure_musl(queue)?;
+
     assert_eq!(FILES.len(), 1, "XXX dlmalloc will probably be a single file forever tho");
     for file in FILES.iter() {
       self.build_cc(file, &mut queue)?;

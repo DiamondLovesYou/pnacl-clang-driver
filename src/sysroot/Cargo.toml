@@ -8,12 +8,17 @@ version = "0.1.0"
 name = "wasm-sysroot"
 path = "src/main.rs"
 
+[lib]
+name = "wasm_sysroot_builder"
+path = "src/lib.rs"
+
 [dependencies]
 lazy_static = "1.0"
 regex = "*"
 tempdir = "0.3.5"
 cmake-driver = { path = "../cmake" }
 dirs = "1.0.5"
+log = "0.4.6"
 
 [dependencies.clang-driver]
 optional = false
@@ -26,7 +31,3 @@ path = "../ld"
 [dependencies.util]
 optional = false
 path = "../util"
-
-[lib]
-name = "sysroot_driver"
-path = "src/lib.rs"

@@ -11,8 +11,16 @@ use std::path::{Path, PathBuf};
 
 impl Invocation {
   pub fn libcxxabi_src(&self) -> PathBuf {
-    super::get_system_dir()
-      .join("libcxxabi")
+    self.srcs.join(self.libcxxabi_repo.name.as_ref())
+  }
+  pub fn checkout_libcxxabi(&mut self) -> Result<(), Box<Error>> {
+    if self.libcxxabi_checkout { return Ok(()); }
+    self.libcxxabi_checkout = true;
+
+    self.checkout_libcxx()?;
+    self.checkout_libunwind()?;
+
+    self.libcxxabi_repo.checkout_thin(self.libcxxabi_src())
   }
   pub fn build_libcxxabi(&self, queue: &mut CommandQueue<Invocation>) -> Result<(), Box<Error>> {
     use std::process::Command;
@@ -35,14 +43,13 @@ impl Invocation {
     let libcxx    = self.libcxx_src();
     let libcxxabi = self.libcxxabi_src();
 
-    let libcxxabi_build = super::get_system_dir()
+    let libcxxabi_build = self.srcs
       .join("libcxxabi-build")
       .create_if_not_exists()?;
 
-    let sysroot = self.tc.sysroot_cache();
+    let sysroot = self.tc().sysroot_cache();
 
-    let mut cmake = cmake_driver::Invocation::default();
-    cmake.override_output(libcxxabi_build.clone());
+    let mut cmake = cmake_driver::Invocation::with_toolchain(self, libcxxabi_build.clone())?;
     cmake
       .cmake_on("LIBCXXABI_USE_COMPILER_RT")
       .cmake_on("LLVM_ENABLE_LIBCXX")
@@ -80,8 +87,9 @@ impl Invocation {
     let mut cmd = Command::new("ninja");
     cmd.current_dir(libcxxabi_build)
       .arg("install");
+    self.tc().set_envs(&mut cmd);
 
-    queue.enqueue_external(None, cmd, None,
+    queue.enqueue_external(Some("install libc++abi"), cmd, None,
                            false, None::<Vec<TempDir>>);
     Ok(())
   }

@@ -16,6 +16,7 @@ maplit = "*"
 regex = "*"
 tempdir = "0.3.5"
 log = "0.4.6"
+git2 = "0.7.0"
 
 [dependencies.elf]
 git = "https://github.com/cole14/rust-elf.git"

@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue,
-           CreateIfNotExists};
+           CreateIfNotExists, ToolArgAccessor, };
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
+use util::repo::Repo;
 use std::fs::remove_file;
+use std::alloc::System;
+use std::collections::btree_set::BTreeSet;
 
 pub mod libc;
 pub mod libcxx;
@@ -25,6 +28,8 @@ extern crate regex;
 extern crate util;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate log;
 extern crate tempdir;
 extern crate dirs;
 
@@ -42,31 +47,55 @@ fn get_system_dir() -> PathBuf {
   pwd.join("../../system")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Invocation {
-  pub tc: WasmToolchain,
-  libraries: Vec<SystemLibrary>,
-  libraries_set: HashSet<SystemLibrary>,
+  pub tc: Option<WasmToolchain>,
+  libraries: BTreeSet<SystemLibrary>,
 
   start_dir: PathBuf,
 
-  llvm_src: Option<PathBuf>,
+  musl_inited: bool,
+  musl_configured: bool,
 
-  clobber_libunwind_build: bool,
-  clobber_libcxxabi_build: bool,
-  clobber_libcxx_build: bool,
-  clobber_libc_build: bool,
-  clobber_compiler_rt_build: bool,
-  clobber_zlib_build: bool,
+  pub llvm_src: Option<PathBuf>,
+  pub srcs: PathBuf,
+
+  pub clobber_libunwind_build: bool,
+  pub clobber_libcxxabi_build: bool,
+  pub clobber_libcxx_build: bool,
+  pub clobber_libc_build: bool,
+  pub clobber_compiler_rt_build: bool,
+  pub clobber_zlib_build: bool,
+
+  pub compiler_rt_repo: Repo,
+  pub musl_repo: Repo,
+  pub libcxx_repo: Repo,
+  pub libcxxabi_repo: Repo,
+  pub zlib_repo: Repo,
+  pub libunwind_repo: Repo,
+
+  compiler_rt_checkout: bool,
+  musl_checkout: bool,
+  libcxx_checkout: bool,
+  libcxxabi_checkout: bool,
+  zlib_checkout: bool,
+  libunwind_checkout: bool,
 
   pub emit_wast: bool,
   pub emit_wasm: bool,
 }
 impl Invocation {
-  fn add_library(&mut self, lib: SystemLibrary) {
-    if self.libraries_set.insert(lib.clone()) {
-      self.libraries.push(lib);
-    }
+  pub fn add_all_libraries(&mut self) {
+    self.add_library(SystemLibrary::Compat);
+    self.add_library(SystemLibrary::DlMalloc);
+    self.add_library(SystemLibrary::CompilerRt);
+    self.add_library(SystemLibrary::LibC);
+    self.add_library(SystemLibrary::LibCxx);
+    self.add_library(SystemLibrary::LibCxxAbi);
+    self.add_library(SystemLibrary::Zlib);
+  }
+  pub fn add_library(&mut self, lib: SystemLibrary) {
+    self.libraries.insert(lib);
   }
   pub fn llvm_src(&self) -> &PathBuf {
     self.llvm_src.as_ref()
@@ -110,16 +139,42 @@ impl Invocation {
       .join(".cargo/bin")
       .join("wasm-clang")
   }
+  pub fn tc(&self) -> &WasmToolchain {
+    self.tc.as_ref()
+      .expect("tc uninitialized")
+  }
+  pub fn init_wasm_tc(&mut self) {
+    if self.tc.is_none() {
+      self.tc = Some(Default::default());
+    }
+  }
+
+  // compiler-rt and dlmalloc needs some libc installed headers:
+  // but compiler-rt and dlmalloc must be built before musl.
+  fn musl_includes(&self, clang: &mut clang_driver::Invocation) {
+    let include = self.get_musl_root().join("include");
+    let arch_include = self.get_musl_root().join("arch/wasm32");
+    let generic_include = self.get_musl_root().join("arch/generic");
+    let config_include = self.get_musl_root().join("obj/include");
+    clang.add_system_include_dir(config_include);
+    clang.add_system_include_dir(generic_include);
+    clang.add_system_include_dir(arch_include);
+    clang.add_system_include_dir(include);
+  }
 }
 impl Default for Invocation {
   fn default() -> Invocation {
     Invocation {
-      libraries: vec!(),
-      libraries_set: Default::default(),
+      tc: None,
+
+      libraries: Default::default(),
 
       start_dir: ::std::env::current_dir().unwrap(),
+      musl_inited: false,
+      musl_configured: false,
 
       llvm_src: None,
+      srcs: get_system_dir(),
 
       clobber_libunwind_build: false,
       clobber_libcxxabi_build: false,
@@ -128,23 +183,52 @@ impl Default for Invocation {
       clobber_compiler_rt_build: false,
       clobber_zlib_build: false,
 
-      tc: WasmToolchain::default(),
+      compiler_rt_repo: Repo::new_git_commit("compiler-rt", COMPILER_RT_REPO, "master",
+                                             COMPILER_RT_COMMIT),
+      musl_repo: Repo::new_git("musl", MUSL_REPO, MUSL_BRANCH),
+      libcxx_repo: Repo::new_git_commit("libcxx", LIBCXX_REPO,
+                                        "master", LIBCXX_COMMIT),
+      libcxxabi_repo: Repo::new_git_commit("libcxxabi", LIBCXXABI_REPO,
+                                           "master", LIBCXXABI_COMMIT),
+      zlib_repo: Repo::new_git_commit("zlib", ZLIB_REPO, "master",
+                                      ZLIB_COMMIT),
+      libunwind_repo: Repo::new_git_commit("libunwind", LIBUNWIND_REPO, "master",
+                                           LIBUNWIND_COMMIT),
+
+      compiler_rt_checkout: false,
+      musl_checkout: false,
+      libcxx_checkout: false,
+      libcxxabi_checkout: false,
+      zlib_checkout: false,
+      libunwind_checkout: false,
 
       emit_wast: false,
       emit_wasm: true,
     }
   }
 }
+const COMPILER_RT_REPO: &'static str = "https://github.com/llvm-mirror/compiler-rt.git";
+const COMPILER_RT_COMMIT: &'static str = "4e8e8d6b18fccced6738aa85dfc28105c7add469";
+const MUSL_REPO: &'static str = "https://github.com/DiamondLovesYou/musl.git";
+const MUSL_BRANCH: &'static str = "wasm-prototype-1";
+const LIBCXX_REPO: &'static str = "https://github.com/llvm-mirror/libcxx.git";
+const LIBCXX_COMMIT: &'static str = "2495dabf93b1d8b9f1c3a18815d23da4b09a1d1f";
+const LIBCXXABI_REPO: &'static str = "https://github.com/llvm-mirror/libcxxabi.git";
+const LIBCXXABI_COMMIT: &'static str = "dd73082d02640d8677d585c8a48243dcdd93e195";
+const ZLIB_REPO: &'static str = "https://github.com/madler/zlib.git";
+const ZLIB_COMMIT: &'static str = "cacf7f1d4e3d44d871b605da3b647f07d718623f";
+const LIBUNWIND_REPO: &'static str = "https://github.com/llvm-mirror/libunwind.git";
+const LIBUNWIND_COMMIT: &'static str = "1e1c6b739595098ba5c466bfe9d58b993e646b48";
 
-#[derive(Debug, PartialEq, Ord, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum SystemLibrary {
   Compat,
-  LibC,
-  LibCxx,
-  LibCxxAbi,
-  LibUnwind,
   CompilerRt,
   DlMalloc,
+  LibC,
+  LibUnwind,
+  LibCxxAbi,
+  LibCxx,
   Zlib,
 }
 impl SystemLibrary { }
@@ -167,91 +251,52 @@ impl FromStr for SystemLibrary {
     }
   }
 }
-impl PartialOrd for SystemLibrary {
-  fn partial_cmp(&self, other: &SystemLibrary) -> Option<Ordering> {
-    let o = match (self, other) {
-      (&SystemLibrary::CompilerRt, &SystemLibrary::CompilerRt) |
-      (&SystemLibrary::LibC, &SystemLibrary::LibC) |
-      (&SystemLibrary::LibCxx, &SystemLibrary::LibCxx) |
-      (&SystemLibrary::LibCxxAbi, &SystemLibrary::LibCxxAbi) |
-      (&SystemLibrary::LibUnwind, &SystemLibrary::LibUnwind) |
-      (&SystemLibrary::Compat, &SystemLibrary::Compat) |
-      (&SystemLibrary::DlMalloc, &SystemLibrary::DlMalloc) |
-      (&SystemLibrary::Zlib, &SystemLibrary::Zlib) =>
-        Ordering::Equal,
-
-      (&SystemLibrary::Compat, _) => Ordering::Less,
-
-      (&SystemLibrary::CompilerRt,
-        &SystemLibrary::Compat) => Ordering::Greater,
-      (&SystemLibrary::CompilerRt,
-        _) => Ordering::Less,
-
-      (&SystemLibrary::DlMalloc,
-        &SystemLibrary::Compat) |
-      (&SystemLibrary::DlMalloc,
-        &SystemLibrary::CompilerRt) => Ordering::Greater,
-      (&SystemLibrary::DlMalloc,
-        _) => Ordering::Less,
-
-      (&SystemLibrary::LibC,
-        &SystemLibrary::CompilerRt) |
-      (&SystemLibrary::LibC,
-        &SystemLibrary::Compat) |
-      (&SystemLibrary::LibC,
-        &SystemLibrary::DlMalloc) => Ordering::Greater,
-      (&SystemLibrary::LibC,
-        _) => Ordering::Less,
-
-      (&SystemLibrary::LibUnwind,
-        &SystemLibrary::CompilerRt) |
-      (&SystemLibrary::LibUnwind,
-        &SystemLibrary::Compat) |
-      (&SystemLibrary::LibUnwind,
-        &SystemLibrary::LibC) => Ordering::Greater,
-      (&SystemLibrary::LibUnwind, _) => Ordering::Less,
-
-      (&SystemLibrary::LibCxxAbi,
-        &SystemLibrary::LibUnwind) |
-      (&SystemLibrary::LibCxxAbi,
-        &SystemLibrary::LibC) |
-      (&SystemLibrary::LibCxxAbi,
-        &SystemLibrary::DlMalloc) |
-      (&SystemLibrary::LibCxxAbi,
-        &SystemLibrary::CompilerRt) |
-      (&SystemLibrary::LibCxxAbi,
-        &SystemLibrary::Compat) => Ordering::Greater,
-      (&SystemLibrary::LibCxxAbi,
-        _) => Ordering::Less,
-
-      (&SystemLibrary::LibCxx,
-        &SystemLibrary::Zlib) => Ordering::Less,
-      (&SystemLibrary::LibCxx,
-        _) => Ordering::Greater,
-
-      (&SystemLibrary::Zlib,
-        _) => Ordering::Greater,
-    };
-
-    Some(o)
-  }
-}
 
 impl WasmToolchainTool for Invocation {
-  fn wasm_toolchain(&self) -> &WasmToolchain { &self.tc }
-  fn wasm_toolchain_mut(&mut self) -> &mut WasmToolchain { &mut self.tc }
+  fn wasm_toolchain(&self) -> &WasmToolchain {
+    self.tc.as_ref()
+      .expect("tc uninitialized")
+  }
+  fn wasm_toolchain_mut(&mut self) -> &mut WasmToolchain {
+    self.tc.as_mut()
+      .expect("tc uninitialized")
+  }
 }
 
 impl Tool for Invocation {
   fn enqueue_commands(&mut self, queue: &mut CommandQueue<Invocation>)
     -> Result<(), Box<Error>>
   {
-    let mut libraries = self.libraries.clone();
-    libraries.sort();
+    let libraries = self.libraries.clone();
     self.libraries.clear();
-    self.libraries_set.clear();
+
+    info!("sysroot build order: {:#?}", libraries);
 
     let mut dlmalloc_built = false;
+
+    for &syslib in libraries.iter() {
+      match syslib {
+        SystemLibrary::LibC => {
+          self.checkout_musl()?;
+        },
+        SystemLibrary::LibCxx => {
+          self.checkout_libcxx()?;
+        },
+        SystemLibrary::LibCxxAbi => {
+          self.checkout_libcxxabi()?;
+        },
+        SystemLibrary::CompilerRt => {
+          self.checkout_compiler_rt()?;
+        },
+        SystemLibrary::Zlib => {
+          self.checkout_zlib()?;
+        },
+        SystemLibrary::LibUnwind => {
+          self.checkout_libunwind()?;
+        }
+        _ => {},
+      }
+    }
 
     for syslib in libraries.into_iter() {
       match syslib {
@@ -297,11 +342,11 @@ impl Tool for Invocation {
   }
 
   fn get_output(&self) -> Option<&PathBuf> {
-    Some(self.tc.sysroot_cache())
+    Some(self.tc().sysroot_cache())
   }
   /// Unconditionally set the output file.
-  fn override_output(&mut self, out: PathBuf) {
-    self.tc.sysroot = out;
+  fn override_output(&mut self, _out: PathBuf) {
+    // ignore
   }
 }
 
@@ -309,13 +354,10 @@ impl ToolInvocation for Invocation {
   fn check_state(&mut self, iteration: usize, skip_inputs_check: bool)
     -> Result<(), Box<Error>>
   {
+    self.init_wasm_tc();
     match iteration {
-      0 => { return Ok(()); }
-      2 => {
-        self.libraries.sort();
-      },
       3 => {
-        if self.libraries.binary_search(&SystemLibrary::LibCxx).is_ok() {
+        if self.libraries.contains(&SystemLibrary::LibCxx) {
           if self.llvm_src.is_none() {
             return Err("Need --llvm-src".into());
           }
@@ -341,8 +383,8 @@ impl ToolInvocation for Invocation {
         EMIT_WAST_FLAG,
       ]),
       1 => {
-        self.tc.args(&mut out);
-      }
+        WasmToolchain::args(&mut out);
+      },
       2 => return tool_arguments!(Invocation => [
         LIBRARIES,
       ]),
@@ -378,7 +420,7 @@ pub fn link(invoc: &Invocation,
   use std::process::Command;
 
   let reloc_out_name = format!("{}.so", out_name);
-  let out = invoc.tc.sysroot_cache()
+  let out = invoc.tc().sysroot_cache()
     .join("lib")
     .create_if_not_exists()?
     .join(&reloc_out_name);
@@ -399,7 +441,7 @@ pub fn link(invoc: &Invocation,
       args.push("-o".to_string());
       args.push(format!("{}", out.display()));
 
-      let mut linker = ld_driver::Invocation::default();
+      let mut linker = ld_driver::Invocation::new_with_toolchain(invoc.wasm_toolchain().clone());
       linker.emit_wast = invoc.emit_wast;
       linker.emit_wasm = invoc.emit_wasm;
       linker.optimize = Some(util::OptimizationGoal::Size);
@@ -413,7 +455,7 @@ pub fn link(invoc: &Invocation,
         let input = ld_driver::Input::File(input);
         linker.add_input(input)?;
       }
-      linker.add_search_path(invoc.tc.sysroot_cache().join("lib"));
+      linker.add_search_path(invoc.tc().sysroot_lib());
       for lib in s2wasm_libs.iter() {
         linker.add_library(lib, false)?;
       }
@@ -430,14 +472,11 @@ pub fn link(invoc: &Invocation,
       }
 
       let static_out_name = format!("{}.a", out_name);
-      let out = invoc.tc.sysroot_cache()
-        .join("lib")
+      let out = invoc.tc().sysroot_lib()
         .create_if_not_exists()?
         .join(&static_out_name);
 
-      remove_file(&out)?;
-
-      let ar = invoc.tc.llvm_tool("llvm-ar");
+      let ar = invoc.tc().llvm_tool("llvm-ar");
       let mut ar = Command::new(ar);
       ar.arg("crs")
         .arg(out)

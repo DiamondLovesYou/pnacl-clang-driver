@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 const FILES: &'static [&'static str] = &[
   "ctype.h",
-  "malloc.h",
 ];
 
 impl Invocation {
@@ -17,7 +16,7 @@ impl Invocation {
     use std::fs::copy;
     let f = move |sess: &mut &mut Invocation| {
       for &file in FILES.iter() {
-        let dest = sess.tc.sysroot()
+        let dest = sess.tc().sysroot()
           .join("include/compat")
           .create_if_not_exists()?
           .join(file);

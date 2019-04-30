@@ -530,6 +530,32 @@ impl<T> CommandQueue<T>
 
     Ok(self.queue.last_mut().unwrap().concrete())
   }
+  pub fn enqueue_simple_tool<U>(&mut self,
+                                name: Option<&'static str>,
+                                mut invoc: U)
+    -> &mut ConcreteCommand
+    where U: ToolInvocation + 'static,
+  {
+    let concrete = ConcreteCommand {
+      name: name.map(|v| v.into() ),
+      cant_fail: false,
+      tmp_dirs: vec![],
+      intermediate_name: None,
+      prev_outputs: true,
+      output_override: true,
+      copy_output_to: None,
+    };
+    let command = Command {
+      cmd: CommandTool(invoc),
+      concrete,
+    };
+    let command = box command;
+    let command = command as Box<ICommand<T>>;
+
+    self.queue.push(command);
+
+    self.queue.last_mut().unwrap().concrete()
+  }
   pub fn enqueue_function<U, F>(&mut self,
                                 name: Option<U>,
                                 f: F)

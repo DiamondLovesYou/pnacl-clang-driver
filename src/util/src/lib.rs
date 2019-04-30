@@ -20,6 +20,7 @@ extern crate elf;
 extern crate tempdir;
 extern crate ctrlc;
 extern crate dirs;
+extern crate git2;
 #[macro_use]
 extern crate log;
 
@@ -426,6 +427,8 @@ pub mod filetype;
 pub mod ldtools;
 pub mod toolchain;
 pub mod command_queue;
+pub mod git;
+pub mod repo;
 
 pub trait CreateIfNotExists: Sized + AsRef<Path> {
   fn create_if_not_exists(self) -> std::io::Result<Self> {
@@ -856,6 +859,11 @@ pub fn boolean_env<K>(k: K) -> bool
     Ok(ref v) if v != "0" => true,
     _ => false,
   }
+}
+fn run_unlogged_cmd(task: &str, mut cmd: process::Command) {
+  println!("({}): Running: {:?}", task, cmd);
+  let mut child = cmd.spawn().unwrap();
+  assert!(child.wait().unwrap().success(), "{:?}", cmd);
 }
 
 /// A function to call if the associated regex was a match. Return `Err` if

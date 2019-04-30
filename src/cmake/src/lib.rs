@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::borrow::Cow;
 use std::fmt;
 
-use util::{ToolArgs, Tool, ToolInvocation, CommandQueue};
-use util::toolchain::WasmToolchain;
+use util::{ToolArgs, Tool, ToolInvocation, CommandQueue,
+           CreateIfNotExists, };
+use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
 extern crate regex;
 #[macro_use]
@@ -33,6 +34,23 @@ pub struct Invocation {
 }
 
 impl Invocation {
+  pub fn new<T>(tc: WasmToolchain, out: T) -> Result<Self, Box<Error>>
+    where T: Into<PathBuf>,
+  {
+    Ok(Invocation {
+      tc,
+      args: vec![],
+      defines: Default::default(),
+      output_dir: out.into().create_if_not_exists()?,
+    })
+  }
+  pub fn with_toolchain<T, U>(tool: &T, out: U) -> Result<Self, Box<Error>>
+    where T: WasmToolchainTool,
+          U: Into<PathBuf>,
+  {
+    let tc = tool.wasm_toolchain().clone();
+    Self::new(tc, out)
+  }
   fn cmake_args_mut(&mut self) -> &mut HashMap<String, Var> {
     &mut self.defines
   }
@@ -154,6 +172,7 @@ impl Tool for Invocation {
     use tempdir::TempDir;
 
     let mut cmd = Command::new("cmake");
+    self.tc.set_envs(&mut cmd);
     cmd.current_dir(self.output_dir.as_path());
 
     let module_dir = get_cmake_modules_dir();

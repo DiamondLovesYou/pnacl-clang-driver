@@ -1,4 +1,4 @@
-extern crate sysroot_driver;
+extern crate wasm_sysroot_builder as sysroot_driver;
 extern crate util;
 
 pub fn main() {

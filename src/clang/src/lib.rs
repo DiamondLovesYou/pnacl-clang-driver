@@ -262,6 +262,46 @@ impl Invocation {
       print_version: false,
     }
   }
+  fn new_with_toolchain(tc: WasmToolchain, mode: DriverMode) -> Self {
+    Invocation {
+      tc,
+      driver_mode: mode,
+      gcc_mode: Default::default(),
+      eh_mode: Default::default(),
+
+      make_deps: Default::default(),
+
+      optimization: Default::default(),
+
+      no_default_libs: false,
+      no_std_lib: false,
+      no_std_inc: false,
+      no_std_incxx: false,
+
+      pic: false,
+
+      shared: false,
+      emit_wast: false,
+
+      file_type: None,
+      inputs: Default::default(),
+      header_inputs: Default::default(),
+
+      linker_args: Default::default(),
+      driver_args: Default::default(),
+
+      output: Default::default(),
+
+      verbose: false,
+      print_version: false,
+    }
+  }
+  pub fn with_toolchain<T>(tool: &T) -> Self
+    where T: WasmToolchainTool,
+  {
+    let tc = tool.wasm_toolchain().clone();
+    Self::new_with_toolchain(tc, DriverMode::new())
+  }
 
   fn print_help(&self) {
     // TODO print more info about what *this* driver does and doesn't support.
@@ -656,6 +696,25 @@ BASIC OPTIONS:
       self.header_inputs.push(file.clone());
     }
   }
+
+  pub fn add_include_dir<T>(&mut self, dir: T)
+    where T: Into<PathBuf>,
+  {
+    self.add_driver_arg("-I");
+    self.add_driver_arg(dir.into());
+  }
+  pub fn add_system_include_dir<T>(&mut self, dir: T)
+    where T: Into<PathBuf>,
+  {
+    self.add_driver_arg("-isystem");
+    self.add_driver_arg(dir.into());
+  }
+  pub fn add_define<T>(&mut self, key: T)
+    where T: Into<OsString>,
+  {
+    self.add_driver_arg("-D");
+    self.add_driver_arg(key);
+  }
 }
 
 impl WasmToolchainTool for Invocation {
@@ -773,7 +832,7 @@ impl ToolInvocation for Invocation {
         SUPPRESS_WARNINGS,
       ]),
       3 => {
-        self.tc.args(&mut out);
+        WasmToolchain::args(&mut out);
       },
       4 => return tool_arguments!(Invocation => [
         TARGET,

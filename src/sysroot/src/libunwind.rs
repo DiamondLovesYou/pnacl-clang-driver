@@ -7,10 +7,18 @@ use cmake_driver;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+// this isn't built, but it's headers are needed for `libcxxabi`.
+
 impl Invocation {
   pub fn libunwind_src(&self) -> PathBuf {
     super::get_system_dir()
       .join("libunwind")
+  }
+  pub fn checkout_libunwind(&mut self) -> Result<(), Box<Error>> {
+    if self.libunwind_checkout { return Ok(()); }
+    self.libunwind_checkout = true;
+
+    self.libunwind_repo.checkout_thin(self.libunwind_src())
   }
   pub fn build_libunwind(&self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>> {
     use std::process::Command;
@@ -38,10 +46,9 @@ impl Invocation {
       .join("libunwind-build")
       .create_if_not_exists()?;
 
-    let sysroot = self.tc.sysroot_cache();
+    let sysroot = self.tc().sysroot_cache();
 
-    let mut cmake = cmake_driver::Invocation::default();
-    cmake.override_output(libunwind_build.clone());
+    let mut cmake = cmake_driver::Invocation::with_toolchain(self, libunwind_build.clone())?;
     cmake
       .cmake_on("LIBUNWIND_USE_COMPILER_RT")
       .cmake_on("LLVM_ENABLE_LIBCXX")
@@ -56,7 +63,7 @@ impl Invocation {
                  format!("{}/", sysroot.display()))
       .cmake_path("LLVM_PATH", self.llvm_src())
       .cmake_path("LIBUNWIND_CXX_INCLUDE_PATHS", libcxx.join("include"))
-      .cmake_path("LLVM_CONFIG_PATH", self.tc.llvm_tool("llvm-config"))
+      .cmake_path("LLVM_CONFIG_PATH", self.tc().llvm_tool("llvm-config"))
       .c_cxx_flag("-nodefaultlibs")
       .c_cxx_flag("-lc")
       .c_cxx_flag(self.c_cxx_linker_cflags())
@@ -74,6 +81,7 @@ impl Invocation {
     let mut cmd = Command::new("ninja");
     cmd.current_dir(libunwind_build);
       //.arg("install");
+    self.tc().set_envs(&mut cmd);
 
     queue.enqueue_external(None, cmd, None,
                            false, None::<Vec<TempDir>>);

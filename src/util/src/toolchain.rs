@@ -1,12 +1,14 @@
 
 use std::env::{var_os};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use {CreateIfNotExists, ToolArgs, ToolArg, };
 
 const BINARYEN_ROOT_ENV: &'static str = "BINARYEN";
 const EMSCRIPTEN_ROOT_ENV: &'static str = "EMSCRIPTEN";
 const LLVM_ROOT_ENV: &'static str = "LLVM_ROOT";
+const SYSROOT_ENV: &'static str = "WASM_SYSROOT";
 
 #[derive(Clone, Debug)]
 pub struct WasmToolchain {
@@ -18,8 +20,6 @@ pub struct WasmToolchain {
 }
 impl WasmToolchain {
   pub fn new() -> WasmToolchain {
-    use dirs::home_dir;
-
     fn get_var(var: &str) -> PathBuf {
       let o = var_os(var)
         .unwrap_or_else(|| {
@@ -36,12 +36,22 @@ impl WasmToolchain {
       binaryen: binaryen,
       emscripten: emscripten,
       llvm,
-      sysroot:  home_dir().unwrap()
-        .join(".wasm-toolchain")
-        .join("sysroot")
-        .create_if_not_exists()
-        .expect("creating sysroot dir"),
+      sysroot: Self::default_sysroot(),
     }
+  }
+
+  pub fn default_sysroot() -> PathBuf {
+    use dirs::home_dir;
+
+    var_os(SYSROOT_ENV)
+      .map(PathBuf::from)
+      .unwrap_or_else(|| {
+        home_dir().unwrap()
+          .join(".wasm-toolchain")
+          .join("sysroot")
+          .create_if_not_exists()
+          .expect("creating sysroot dir")
+      })
   }
 
   pub fn llvm_tool<T>(&self, tool: T) -> PathBuf
@@ -73,7 +83,14 @@ impl WasmToolchain {
   pub fn sysroot_cache(&self) -> &PathBuf { &self.sysroot }
   pub fn sysroot_lib(&self) -> PathBuf { self.sysroot.join("lib") }
 
-  pub fn args<T>(&self, into: &mut ToolArgs<T>)
+  pub fn set_envs(&self, cmd: &mut Command) {
+    cmd.env(BINARYEN_ROOT_ENV, &self.binaryen)
+      .env(EMSCRIPTEN_ROOT_ENV, &self.emscripten)
+      .env(LLVM_ROOT_ENV, &self.llvm)
+      .env(SYSROOT_ENV, &self.sysroot);
+  }
+
+  pub fn args<T>(into: &mut ToolArgs<T>)
     where T: WasmToolchainTool,
   {
     let o = ToolArg {
