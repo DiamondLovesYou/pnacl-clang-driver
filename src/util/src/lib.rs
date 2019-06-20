@@ -868,7 +868,7 @@ fn run_unlogged_cmd(task: &str, mut cmd: process::Command) {
 /// there was an error parsing the captured regex.
 /// The second param indicates whether the argument matched the single or split
 /// forms. True for single.
-pub type ToolArgActionFn<This> = fn(&mut This, bool, regex::Captures) -> Result<(), Box<Error>>;
+pub type ToolArgActionFn<This> = fn(&mut This, bool, regex::Captures) -> Result<(), Box<dyn Error>>;
 
 pub type ToolArgAction<This> = Option<ToolArgActionFn<This>>;
 
@@ -954,7 +954,7 @@ impl<This> InitedToolArg<This>
   pub fn check<'a, T>(&self,
                       this: &mut This,
                       args: &mut Peekable<T>,
-                      count: &mut usize) -> Option<Result<(), Box<Error>>>
+                      count: &mut usize) -> Option<Result<(), Box<dyn Error>>>
   // Some(Ok(<number of args used>))
     where T: Iterator,
           <T as Iterator>::Item: AsRef<str> + PartialEq<&'a str>
@@ -1029,12 +1029,12 @@ impl<This> InitedToolArg<This>
 pub type ToolArgs<This> = Cow<'static, [ToolArg<This>]>;
 
 pub trait Tool: fmt::Debug {
-  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<Error>>
+  fn enqueue_commands(&mut self, queue: &mut CommandQueue<Self>) -> Result<(), Box<dyn Error>>
     where Self: Sized;
 
   fn get_name(&self) -> String;
 
-  fn add_tool_input(&mut self, input: PathBuf) -> Result<(), Box<Error>>;
+  fn add_tool_input(&mut self, input: PathBuf) -> Result<(), Box<dyn Error>>;
 
   fn get_output(&self) -> Option<&PathBuf>;
   /// Unconditionally set the output file.
@@ -1043,7 +1043,7 @@ pub trait Tool: fmt::Debug {
 
 /// Tool argument processing.
 pub trait ToolInvocation: Tool + Default {
-  fn check_state(&mut self, iteration: usize, skip_inputs_check: bool) -> Result<(), Box<Error>>;
+  fn check_state(&mut self, iteration: usize, skip_inputs_check: bool) -> Result<(), Box<dyn Error>>;
 
   /// Called until `None` is returned. Put args that override errors before
   /// the the args that can have those errors
@@ -1053,11 +1053,11 @@ pub trait ToolInvocation: Tool + Default {
 pub fn process_invocation_args<T>(invocation: &mut T,
                                   args: Vec<String>,
                                   skip_inputs_check: bool)
-  -> Result<(), Box<Error>>
+  -> Result<(), Box<dyn Error>>
   where T: ToolInvocation + 'static,
 {
   use std::collections::BTreeMap;
-  use std::io::{Write, Cursor};
+  use std::io::{Cursor, };
   use std::ops::RangeFull;
 
   let mut program_args: BTreeMap<usize, String> = args
@@ -1082,7 +1082,7 @@ pub fn process_invocation_args<T>(invocation: &mut T,
     //println!("iteration `{}`", iteration);
 
     // (the argument that caused the error, the error msg)
-    let mut errors: Vec<(String, Box<Error>)> = Default::default();
+    let mut errors: Vec<(String, Box<dyn Error>)> = Default::default();
 
     {
       let mut program_arg_id = 0;
@@ -1216,7 +1216,7 @@ pub fn main_inner<T>(invocation: Option<T>) -> Result<T, CommandQueueError>
     })
 }
 
-pub fn main<T>(outs: Option<(&mut Write, &mut Write)>)
+pub fn main<T>(outs: Option<(&mut dyn Write, &mut dyn Write)>)
   -> Result<(), i32>
   where T: ToolInvocation + 'static,
 {

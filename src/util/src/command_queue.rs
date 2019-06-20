@@ -1,7 +1,6 @@
 
 use std;
 use std::borrow::Cow;
-use std::boxed::FnBox;
 use std::error::Error;
 use std::fmt::{self, Debug, Formatter};
 use std::fs::{copy};
@@ -9,16 +8,16 @@ use std::ops::{Deref, DerefMut};
 use std::path::{PathBuf};
 use std::process;
 use std::rc::Rc;
-use std::sync::{Once, ONCE_INIT};
-use std::sync::atomic::{AtomicBool, ATOMIC_BOOL_INIT, Ordering};
+use std::sync::{Once, };
+use std::sync::atomic::{AtomicBool, Ordering, };
 
 use tempdir::TempDir;
 
 use super::{ToolInvocation, process_invocation_args,
             boolean_env};
 
-static STOP_BEFORE_NEXT_JOB: AtomicBool = ATOMIC_BOOL_INIT;
-static CTRL_C_HANDLER: Once = ONCE_INIT;
+static STOP_BEFORE_NEXT_JOB: AtomicBool = AtomicBool::new(false);
+static CTRL_C_HANDLER: Once = Once::new();
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum InputArgsTransformResult {
@@ -46,7 +45,7 @@ impl<T> DerefMut for CommandTool<T> {
 }
 pub struct ExternalCommand(process::Command,
                            Option<Cow<'static, str>>,
-                           Option<Box<FnBox(&mut process::Command, &[PathBuf]) -> InputArgsTransformResult>>);
+                           Option<Box<dyn FnOnce(&mut process::Command, &[PathBuf]) -> InputArgsTransformResult>>);
 impl Debug for ExternalCommand {
   fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
     match self.2 {
@@ -55,7 +54,7 @@ impl Debug for ExternalCommand {
     }
   }
 }
-pub struct FunctionCommand<T>(Option<Box<FnBox(&mut &mut T) -> Result<(), CommandQueueError>>>);
+pub struct FunctionCommand<T>(Option<Box<dyn FnOnce(&mut &mut T) -> Result<(), CommandQueueError>>>);
 impl<T> Debug for FunctionCommand<T> {
   fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
     match self {
@@ -68,7 +67,7 @@ impl<T> Debug for FunctionCommand<T> {
     }
   }
 }
-pub struct FunctionCommandWithState<T>(Option<Box<FnBox(&mut &mut T, &mut RunState) -> Result<(), CommandQueueError>>>);
+pub struct FunctionCommandWithState<T>(Option<Box<dyn FnOnce(&mut &mut T, &mut RunState) -> Result<(), CommandQueueError>>>);
 impl<T> Debug for FunctionCommandWithState<T> {
   fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
     match self {
@@ -95,7 +94,7 @@ pub struct ConcreteCommand {
 }
 
 impl ConcreteCommand {
-  pub fn copy_output_to(&self, out: PathBuf) -> Result<(), Box<Error>> {
+  pub fn copy_output_to(&self, out: PathBuf) -> Result<(), Box<dyn Error>> {
     if let Some(copy_to) = self.copy_output_to.as_ref() {
       copy(out, copy_to)?;
     }
@@ -177,7 +176,7 @@ impl<T> ICommand<T> for Command<FunctionCommand<T>>
     info!("on command: {:?} => {:?}", self.name, self.cmd);
 
     let f = self.cmd.0.take().unwrap();
-    Ok(FnBox::call_box(f, (invoc,))?)
+    Ok((f)(invoc,)?)
   }
   fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
 }
@@ -189,7 +188,7 @@ impl<T> ICommand<T> for Command<FunctionCommandWithState<T>>
     info!("on command: {:?} => {:?}", self.name, self.cmd);
 
     let f = self.cmd.0.take().unwrap();
-    Ok(FnBox::call_box(f, (invoc, state))?)
+    Ok((f)(invoc, state)?)
   }
   fn concrete(&mut self) -> &mut ConcreteCommand { &mut self.concrete }
 }
@@ -202,7 +201,7 @@ impl<U> ICommand<U> for Command<ExternalCommand> {
 
     if self.prev_outputs {
       if let Some(transform) = self.cmd.2.take() {
-        let action = transform.call_box((&mut self.cmd.0, state.prev_outputs.as_ref()));
+        let action = (transform)(&mut self.cmd.0, state.prev_outputs.as_ref());
         state.prev_outputs.clear();
         match action {
           InputArgsTransformResult::Skip => {
@@ -276,7 +275,7 @@ pub struct RunState<'q> {
   pub dry_run: bool,
 }
 impl<'q> RunState<'q> {
-  fn new(final_output: Option<&'q PathBuf>) -> Result<RunState<'q>, Box<Error>> {
+  fn new(final_output: Option<&'q PathBuf>) -> Result<RunState<'q>, Box<dyn Error>> {
     Ok(RunState {
       idx: 0,
       final_output,
@@ -318,7 +317,7 @@ impl<'q> Drop for RunState<'q> {
 
 #[derive(Debug)]
 pub enum CommandQueueError {
-  Error(Box<Error>),
+  Error(Box<dyn Error>),
   ProcessError(Option<i32>),
 }
 impl From<String> for CommandQueueError {
@@ -326,8 +325,8 @@ impl From<String> for CommandQueueError {
     CommandQueueError::Error(From::from(v))
   }
 }
-impl From<Box<Error>> for CommandQueueError {
-  fn from(v: Box<Error>) -> CommandQueueError {
+impl From<Box<dyn Error>> for CommandQueueError {
+  fn from(v: Box<dyn Error>) -> CommandQueueError {
     CommandQueueError::Error(v)
   }
 }
@@ -340,7 +339,7 @@ impl From<std::io::Error> for CommandQueueError {
 pub struct CommandQueue<T> {
   pub final_output: Option<PathBuf>,
 
-  queue: Vec<Box<ICommand<T>>>,
+  queue: Vec<Box<dyn ICommand<T>>>,
   verbose: bool,
   dry_run: bool,
 }
@@ -414,7 +413,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
     self.queue.last_mut().unwrap().concrete()
@@ -448,7 +446,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
     self.queue.last_mut().unwrap().concrete()
@@ -487,7 +484,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
     self.queue.last_mut().unwrap().concrete()
@@ -498,7 +494,7 @@ impl<T> CommandQueue<T>
                             mut invocation: U, args: Vec<String>,
                             cant_fail: bool,
                             tmp_dirs: Option<Vec<V>>)
-    -> Result<&mut ConcreteCommand, Box<Error>>
+    -> Result<&mut ConcreteCommand, Box<dyn Error>>
     where U: ToolInvocation + 'static,
           V: Into<Rc<TempDir>>,
   {
@@ -524,7 +520,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
 
@@ -532,7 +527,7 @@ impl<T> CommandQueue<T>
   }
   pub fn enqueue_simple_tool<U>(&mut self,
                                 name: Option<&'static str>,
-                                mut invoc: U)
+                                invoc: U)
     -> &mut ConcreteCommand
     where U: ToolInvocation + 'static,
   {
@@ -550,7 +545,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
 
@@ -579,7 +573,6 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
     self.queue.last_mut().unwrap().concrete()
@@ -607,13 +600,12 @@ impl<T> CommandQueue<T>
       concrete,
     };
     let command = box command;
-    let command = command as Box<ICommand<T>>;
 
     self.queue.push(command);
     self.queue.last_mut().unwrap().concrete()
   }
 
-  pub fn enqueue_custom(&mut self, runner: Box<ICommand<T>>)
+  pub fn enqueue_custom(&mut self, runner: Box<dyn ICommand<T>>)
     -> &mut ConcreteCommand
   {
     self.queue.push(runner);

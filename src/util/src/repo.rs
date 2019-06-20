@@ -87,7 +87,7 @@ impl Repo {
   }
 
   pub fn checkout<T>(&self, dest: T, fat: bool)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
     where T: AsRef<Path>,
   {
     let dest = dest.as_ref();
@@ -117,13 +117,13 @@ impl Repo {
     Ok(())
   }
   pub fn checkout_thin<T>(&self, dest: T)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
     where T: AsRef<Path>,
   {
     self.checkout(dest, false)
   }
   pub fn checkout_fat<T>(&self, dest: T)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
     where T: AsRef<Path>,
   {
     self.checkout(dest, true)
@@ -136,7 +136,7 @@ impl Repo {
   pub fn add_remote_from<T>(&self, checkout: &PathBuf,
                             from: &Repo,
                             queue: &mut CommandQueue<T>)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
     where T: ToolInvocation + 'static,
   {
 
@@ -203,7 +203,7 @@ impl Repo {
                                       branch_name: T,
                                       start_at: &Repo,
                                       queue: &mut CommandQueue<U>)
-    -> Result<Repo, Box<Error>>
+    -> Result<Repo, Box<dyn Error>>
     where T: AsRef<str>,
           U: ToolInvocation + 'static,
   {
@@ -234,7 +234,7 @@ impl Repo {
   pub fn merge_branch<T>(&self, checkout: &PathBuf,
                          branch: &Repo,
                          queue: &mut CommandQueue<T>)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
     where T: ToolInvocation + 'static,
   {
     let mut cmd = Command::new("git");

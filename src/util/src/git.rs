@@ -1,8 +1,10 @@
 
 use super::{run_unlogged_cmd};
 
-use git2::{self, Repository, Error};
+use git2::{Repository, };
 
+// XXX technically, no function here even returns an error.
+use std::error::Error;
 use std::fs::remove_dir_all;
 use std::path::{Path, PathBuf};
 use std::process::{Command};
@@ -16,7 +18,7 @@ pub fn checkout_repo(task: &str, dest: &Path,
     clone = true
   } else {
     loop {
-      let repo = git2::Repository::open(dest);
+      let repo = Repository::open(dest);
       if repo.is_err() {
         remove_dir_all(dest).unwrap();
         clone = true;
@@ -97,7 +99,7 @@ pub fn checkout_or_override(name: &str,
                             repo_url: &str,
                             repo_branch: &str,
                             thin: bool)
-                            -> Result<(), Box<Error>>
+  -> Result<(), Box<dyn Error>>
 {
   checkout_or_override_raw(name, dest_path,
                            over, repo_url, repo_branch,
@@ -109,7 +111,7 @@ pub fn checkout_or_override_commit(name: &str,
                                    repo_url: &str,
                                    repo_commit: &str,
                                    thin: bool)
-  -> Result<(), Box<Error>>
+  -> Result<(), Box<dyn Error>>
 {
   checkout_or_override_raw(name, dest_path,
                            over, repo_url, repo_commit,
@@ -122,7 +124,7 @@ pub fn checkout_or_override_raw<F>(name: &str,
                                    repo_branch: &str,
                                    thin: bool,
                                    checkout_repo: F)
-  -> Result<(), Box<Error>>
+  -> Result<(), Box<dyn Error>>
   where F: FnOnce(&str, &Path, &str, &str, bool)
 {
   let repo_url = if let Some(dir) = over {
@@ -153,7 +155,7 @@ pub fn checkout_repo_commit(task: &str, dest: &Path,
     clone = true
   } else {
     loop {
-      let repo = git2::Repository::open(dest);
+      let repo = Repository::open(dest);
       if repo.is_err() {
         remove_dir_all(dest).unwrap();
         clone = true;

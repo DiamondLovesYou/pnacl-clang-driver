@@ -9,7 +9,7 @@ use ldtools;
 
 // Rust goes into anaphylaxic shock on mutable globals which require
 // drops. This backflip is to that effect. The pointer is never deallocated.
-static FILETYPE_CACHE_START: sync::Once = sync::ONCE_INIT;
+static FILETYPE_CACHE_START: sync::Once = sync::Once::new();
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct FiletypeCache(*mut Arc<Mutex<HashMap<PathBuf, Type>>>);
 unsafe impl Sync for FiletypeCache {}
@@ -57,7 +57,7 @@ pub fn get_cached_filetype<T: AsRef<Path>>(p: T) -> Option<Type> {
 }
 
 // for testing:
-static FILE_CACHE_START: sync::Once = sync::ONCE_INIT;
+static FILE_CACHE_START: sync::Once = sync::Once::new();
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct FileContentsCache(*mut Arc<Mutex<HashMap<PathBuf, &'static [u8]>>>);
@@ -106,7 +106,7 @@ impl<T> ReadSeek for T
 pub fn get_file_contents<T, F, U>(path: T, f: F)
   -> io::Result<U>
   where T: AsRef<Path>,
-        F: FnOnce(&T, &mut ReadSeek) -> U,
+        F: FnOnce(&T, &mut dyn ReadSeek) -> U,
 {
   use std::fs::File;
   let opt = {
@@ -318,9 +318,6 @@ pub mod ar {
   pub fn is_buffer_an_archive<T: ::std::io::Read + ::std::io::Seek + ?Sized>(io: &mut T) ->
   bool
   {
-    use std::io::{SeekFrom};
-    use std::mem;
-
     let mut buf: [u8; 8] = unsafe { mem::uninitialized() };
     match io.read(buf.as_mut()) {
       Ok(n) => {
