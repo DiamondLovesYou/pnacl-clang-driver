@@ -3,6 +3,7 @@ authors = ["Richard Diamond <wichard@vitalitystudios.com>"]
 description = "Builds the system libraries for WebAssembly"
 name = "sysroot"
 version = "0.1.0"
+exclude = ["*.iml", ".idea"]
 
 [[bin]]
 name = "wasm-sysroot"

@@ -3,6 +3,7 @@ license = "MIT"
 name = "ld-driver"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "0.0.0"
+exclude = ["*.iml", ".idea"]
 
 [[bin]]
 name = "wasm-ld"

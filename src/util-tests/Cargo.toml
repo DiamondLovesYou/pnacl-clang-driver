@@ -3,6 +3,7 @@ license = "MIT"
 name = "util-tests"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "0.0.0"
+exclude = ["*.iml", ".idea"]
 
 [dependencies]
 lazy_static = "*"

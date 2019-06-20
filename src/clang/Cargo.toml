@@ -3,6 +3,7 @@ license = "MIT"
 name = "clang-driver"
 repository = ""
 version = "0.0.0"
+exclude = ["*.iml", ".idea"]
 
 [[bin]]
 name = "wasm-clang"
