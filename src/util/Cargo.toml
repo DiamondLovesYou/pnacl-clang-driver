@@ -4,6 +4,7 @@ license = "MIT"
 name = "util"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "0.0.0"
+
 [build-dependencies]
 regex = "*"
 
@@ -18,11 +19,6 @@ tempdir = "0.3.5"
 log = "0.4.6"
 git2 = "0.8.0"
 
-[dependencies.elf]
-git = "https://github.com/cole14/rust-elf.git"
-
 [features]
 default = ["wasm"]
-nacl = []
 wasm = []
-[target.wasm32-unknown-emscripten]

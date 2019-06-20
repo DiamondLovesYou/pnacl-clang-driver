@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use util::{Arch, CommandQueue};
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
-pub use util::ldtools::{Input, AllowedTypes};
+pub use util::ldtools::{Input, };
 
 extern crate regex;
 #[macro_use] extern crate util;
 #[macro_use] extern crate lazy_static;
-extern crate ar;
 extern crate tempdir;
 
 #[derive(Clone, Debug)]
@@ -251,8 +250,7 @@ impl Invocation {
     -> Result<(), Box<Error>>
     where T: Into<PathBuf>,
   {
-    let input = Input::Library(abs, p.into(),
-                               AllowedTypes::Any);
+    let input = Input::Library(abs, p.into());
     self.add_input(input)
   }
 
@@ -264,8 +262,7 @@ impl Invocation {
     'outer: for input in expanded.into_iter() {
       let into = 'inner: loop {
         let _file: &PathBuf = match &input {
-          &Input::Library(_, _, AllowedTypes::Any) => unreachable!(),
-          &Input::Library(_, ref p, _) => p,
+          &Input::Library(_, ref p) => p,
           &Input::Flag(ref flag) => {
             let flags = vec![flag.clone()];
             util::process_invocation_args(self, flags,
@@ -425,7 +422,7 @@ impl util::Tool for Invocation {
     }
     for input in self.bitcode_inputs.iter() {
       match input {
-        &Input::Library(false, ref p, _) => {
+        &Input::Library(false, ref p) => {
           cmd.arg("-L")
             .arg(p.parent().unwrap());
 
@@ -451,7 +448,7 @@ impl util::Tool for Invocation {
           cmd.arg(format!("-l{}", s));
           continue;
         },
-        &Input::Library(true, ref p, _) => {
+        &Input::Library(true, ref p) => {
           cmd.arg(p);
           continue;
         },
@@ -707,12 +704,12 @@ tool_argument!(LIBRARY: Invocation = { Some(r"^-l([^:]+)$"), Some(r"^-(l|-librar
                    0
                  };
                  let path = Path::new(cap.get(i).unwrap().as_str()).to_path_buf();
-                 this.add_input(Input::Library(false, path, AllowedTypes::Any))
+                 this.add_input(Input::Library(false, path))
                });
 tool_argument!(ABS_LIBRARY: Invocation = { Some(r"^-l:(.+)$"), None };
                fn add_abs_library(this, _single, cap) {
                  let path = Path::new(cap.get(1).unwrap().as_str()).to_path_buf();
-                 this.add_input(Input::Library(true, path, AllowedTypes::Any))
+                 this.add_input(Input::Library(true, path))
                });
 
 fn add_input_flag<'str>(this: &mut Invocation,

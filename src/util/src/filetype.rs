@@ -167,7 +167,6 @@ const WASM_MAGIC: &'static [u8] = &[
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Subtype {
   Bitcode,
-  ELF(elf::types::Machine),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -255,10 +254,6 @@ pub fn file_type<T>(path: T) -> io::Result<Option<Type>>
       return Some(Type::Wasm);
     }
 
-    if let Ok(elf) = elf::File::open_stream(&mut file) {
-      return Some(Type::Object(Subtype::ELF(elf.ehdr.machine)));
-    }
-
     if let Ok(Some(ar_type)) = ar::stream_archive_type(&mut file) {
       return Some(Type::Archive(ar_type));
     }
@@ -269,47 +264,6 @@ pub fn file_type<T>(path: T) -> io::Result<Option<Type>>
   Ok(t)
 }
 
-pub fn is_file_native<T: AsRef<Path>>(path: T) -> bool {
-  let cached = get_cached_filetype(&path)
-    .map(|t| {
-      match t {
-        Type::Object(Subtype::ELF(_)) |
-        Type::Archive(Subtype::ELF(_)) => true,
-        _ => false,
-      }
-    });
-  match cached {
-    Some(v) => { return v; },
-    _ => {},
-  }
-
-  let is_obj_bc = get_file_contents(&path, |_, file| {
-    is_stream_llvm_bitcode(file) ||
-      is_stream_pnacl_bitcode(file) ||
-      is_stream_wasm_module(file)
-  });
-  match is_obj_bc {
-    Ok(v) if v => {
-      return false;
-    }
-    _ => { },
-  }
-
-  if ar::archive_type(&path)
-    .map(|ar| {
-      match ar {
-        ar::Type::ELF(_) => false,
-        _ => true,
-      }
-    }).unwrap_or(false)
-    {
-      return false;
-    }
-
-  // if the file isn't a portable type, we assume it must be native.
-  return true;
-}
-
 pub fn could_be_linker_script<T: AsRef<Path>>(path: T) -> bool {
   let exts: ::std::collections::HashSet<Option<::std::ffi::OsString>> = hashset!{
         Some(From::from("o")), Some(From::from("so")),
@@ -318,7 +272,6 @@ pub fn could_be_linker_script<T: AsRef<Path>>(path: T) -> bool {
     };
 
   exts.contains(&path.as_ref().extension().map(|v| From::from(v) )) &&
-    !elf::is_file_elf(&path) &&
     ar::archive_type(&path).is_none() &&
     !is_file_raw_llvm_bitcode(&path) &&
     !is_file_wrapped_llvm_bitcode(&path)
@@ -339,7 +292,6 @@ pub mod ar {
 
   use super::{is_stream_llvm_bitcode, get_cached_filetype,
               get_file_contents, override_filetype};
-  use super::{elf};
 
   pub use super::Subtype as Type;
 
@@ -385,7 +337,6 @@ pub mod ar {
   }
 
   pub fn archive_type<T: AsRef<Path>>(path: T) -> Option<Type> {
-    use elf;
     get_cached_filetype(&path)
       .and_then(|t| match t {
         super::Type::Archive(subtype) => Some(subtype),
@@ -405,9 +356,6 @@ pub mod ar {
           if is_stream_llvm_bitcode(&mut stream) {
             override_filetype(path, super::Type::Archive(Type::Bitcode));
             return Some(Type::Bitcode);
-          } else if let Ok(elf) = elf::File::open_stream(&mut stream) {
-            override_filetype(path, super::Type::Archive(Type::ELF(elf.ehdr.machine)));
-            return Some(Type::ELF(elf.ehdr.machine));
           }
         }
         None
@@ -427,8 +375,6 @@ pub mod ar {
         let mut stream = Cursor::new(&mut buffer);
         if is_stream_llvm_bitcode(&mut stream) {
           break 'block Ok(Some(Type::Bitcode));
-        } else if let Ok(elf) = elf::File::open_stream(&mut stream) {
-          break 'block Ok(Some(Type::ELF(elf.ehdr.machine)));
         }
       }
 
@@ -517,26 +463,5 @@ pub mod ar {
       self.is_regular_member() &&
         self.name().starts_with("/")
     }
-  }
-}
-
-pub mod elf {
-  use elf;
-
-  pub use elf::*;
-
-  pub fn is_file_elf<T: AsRef<::std::path::Path>>(path: T) -> bool {
-    elf::File::open_path(path).ok().is_some()
-  }
-  pub fn is_stream_elf<T>(io: &mut T) -> bool
-    where T: ::std::io::Read + ::std::io::Seek,
-  {
-    use std::io::SeekFrom;
-
-    let pos = io.seek(SeekFrom::Current(0)).unwrap();
-    let result = elf::File::open_stream(io).ok().is_some();
-    io.seek(SeekFrom::Start(pos)).unwrap();
-
-    result
   }
 }

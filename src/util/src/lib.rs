@@ -3,7 +3,6 @@
 #![feature(fnbox, fn_traits, unboxed_closures)]
 #![cfg_attr(test, feature(set_stdio))]
 
-//use std::boxed::FnBox;
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self};
@@ -16,7 +15,6 @@ pub use command_queue::{CommandQueueError, CommandQueue,
                         Command};
 
 pub extern crate regex;
-extern crate elf;
 extern crate tempdir;
 extern crate ctrlc;
 extern crate dirs;

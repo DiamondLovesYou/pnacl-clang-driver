@@ -8,7 +8,7 @@ use filetype;
 
 #[derive(Clone, Debug)]
 pub enum Input {
-  Library(bool, PathBuf, AllowedTypes),
+  Library(bool, PathBuf),
   File(PathBuf),
   Flag(String),
 }
@@ -16,8 +16,8 @@ pub enum Input {
 impl fmt::Display for Input {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
-      &Input::Library(false, ref p, _) => write!(f, "-l{}", p.display()),
-      &Input::Library(true, ref p, _) => write!(f, "-l:{}", p.display()),
+      &Input::Library(false, ref p) => write!(f, "-l{}", p.display()),
+      &Input::Library(true, ref p) => write!(f, "-l:{}", p.display()),
       &Input::File(ref p) => write!(f, "{}", p.display()),
       &Input::Flag(ref flag) => write!(f, "{}", flag),
     }
@@ -192,23 +192,8 @@ pub fn parse_linker_script<T, U>(input: T, dir: U)
         ret.push(Input::Flag(curr.into()));
       } else {
         let file = dir.as_ref().join(curr);
-        ret.push(Input::Library(true, file, AllowedTypes::Any));
+        ret.push(Input::Library(true, file));
       }
-    }
-  }
-}
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AllowedTypes {
-  Any,
-  Bitcode,
-  Native,
-}
-impl AllowedTypes {
-  pub fn check<T: AsRef<Path>>(&self, path: T) -> bool {
-    match self {
-      &AllowedTypes::Any => true,
-      &AllowedTypes::Bitcode => !filetype::is_file_native(path.as_ref()),
-      &AllowedTypes::Native => filetype::is_file_native(path.as_ref()),
     }
   }
 }
@@ -216,16 +201,14 @@ impl AllowedTypes {
 pub fn expand_input(input: Input, search: &[PathBuf],
                     static_only: bool) -> Result<Vec<Input>, String> {
 
-  fn find_file<T: AsRef<Path>>(name: T, search: &[PathBuf],
-                               allowed_types: AllowedTypes) -> Option<PathBuf> {
+  fn find_file<T: AsRef<Path>>(name: T, search: &[PathBuf]) -> Option<PathBuf> {
     for dir in search.iter() {
       let full = dir.join(&name);
       if !full.exists() { continue; }
 
-      if filetype::is_linker_script(&full) { return Some(full); }
-
-      if allowed_types.check(&full) { return Some(full); }
+      return Some(full);
     }
+
     None
   }
 
@@ -233,20 +216,17 @@ pub fn expand_input(input: Input, search: &[PathBuf],
 
   let r = match input {
     Input::Flag(f) => Input::Flag(f),
-    Input::Library(is_absolute, path, allowed_types) => {
+    Input::Library(is_absolute, path) => {
       let chain = if is_absolute {
-        find_file(&path, search, allowed_types)
+        find_file(&path, search)
       } else {
         if !static_only {
-          find_file(format!("lib{}.so", path.display()),
-                    search, allowed_types)
+          find_file(format!("lib{}.so", path.display()), search)
             .or_else(|| {
-              find_file(format!("lib{}.a", path.display()), search,
-                        allowed_types)
+              find_file(format!("lib{}.a", path.display()), search)
             })
         } else {
-          find_file(format!("lib{}.a", path.display()), search,
-                    allowed_types)
+          find_file(format!("lib{}.a", path.display()), search)
         }
       };
 
@@ -261,12 +241,7 @@ pub fn expand_input(input: Input, search: &[PathBuf],
               return Ok(ret);
             }
           }
-          let t = if !filetype::is_file_native(&p) {
-            AllowedTypes::Bitcode
-          } else {
-            AllowedTypes::Native
-          };
-          Input::Library(true, p, t)
+          Input::Library(true, p)
         },
         None => {
           return Err(format!("`{}{}` not found",
