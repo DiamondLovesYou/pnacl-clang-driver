@@ -3,19 +3,19 @@ build = "src/build.rs"
 license = "MIT"
 name = "util"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
-version = "0.0.0"
+version = "1.0.0"
 exclude = ["*.iml", ".idea"]
 
 [build-dependencies]
-regex = "*"
+regex = { version = "1.1.7", registry = "crates-io" }
 
 [dependencies]
-ar = "0.3.0"
-ctrlc = "3.0.3"
-dirs = "1.0.3"
-lazy_static = "1.0"
-maplit = "*"
-regex = "*"
-tempdir = "0.3.5"
-log = "0.4.6"
-git2 = "0.8.0"
+ar = { version = "0.3.0", registry = "crates-io" }
+ctrlc = { version = "3.0.3", registry = "crates-io" }
+dirs = { version = "1.0.3", registry = "crates-io" }
+lazy_static = { version = "1.0", registry = "crates-io" }
+maplit = { version = "1.0.1", registry = "crates-io" }
+regex = { version = "1.1.7", registry = "crates-io" }
+tempdir = { version = "0.3.5", registry = "crates-io" }
+log = { version = "0.4.6", registry = "crates-io" }
+git2 = { version = "0.8.0", registry = "crates-io" }

@@ -1,0 +1,10 @@
+# DO NOT PUT CREDENTIALS IN HERE
+# The util crate is also published in a private alternative registry,
+# but since it refers to a few crates.io crates, we have to explicitly
+# redirect cargo back crates.io.
+# The sad thing is, `crates-io` as specified below is not built in
+# to Cargo! So to not require configuring this registry manually, we have
+# this file here.
+
+[registries]
+crates-io = { index = "https://github.com/rust-lang/crates.io-index.git" }
