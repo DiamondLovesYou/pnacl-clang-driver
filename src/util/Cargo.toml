@@ -18,7 +18,3 @@ regex = "*"
 tempdir = "0.3.5"
 log = "0.4.6"
 git2 = "0.8.0"
-
-[features]
-default = ["wasm"]
-wasm = []
