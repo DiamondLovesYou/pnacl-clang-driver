@@ -1,6 +1,6 @@
 
 extern crate ld_driver;
-extern crate util;
+extern crate wasm_driver_utils as util;
 extern crate env_logger;
 
 pub fn main() {

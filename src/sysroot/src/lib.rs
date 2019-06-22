@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue,
-           CreateIfNotExists, ToolArgAccessor, };
+           CreateIfNotExists, ToolArgAccessor, regex, };
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 use util::repo::Repo;
 use std::fs::remove_file;
@@ -23,9 +23,8 @@ pub mod compiler_rt;
 pub mod compat;
 pub mod zlib;
 
-extern crate regex;
 #[macro_use]
-extern crate util;
+extern crate wasm_driver_utils as util;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]

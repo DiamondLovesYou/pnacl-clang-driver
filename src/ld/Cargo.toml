@@ -1,8 +1,8 @@
 [package]
 license = "MIT"
-name = "ld-driver"
+name = "wasm-ld-driver"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
-version = "0.0.0"
+version = "0.1.0"
 exclude = ["*.iml", ".idea"]
 
 [[bin]]
@@ -10,14 +10,12 @@ name = "wasm-ld"
 path = "src/main.rs"
 
 [dependencies]
-lazy_static = "1.0"
-regex = "*"
-tempdir = "0.3.5"
-env_logger = "0.6.1"
+lazy_static = { version = "1.0", registry = "crates-io" }
+env_logger = { version = "0.6.1", registry = "crates-io" }
 
-[dependencies.util]
+[dependencies.wasm-driver-utils]
 path = "../util"
-version = "*"
+version = "1.0.0"
 
 [lib]
 name = "ld_driver"

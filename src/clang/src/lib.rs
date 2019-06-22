@@ -10,20 +10,16 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::ffi::OsString;
 
-use tempdir::TempDir;
-
-use util::{EhMode, OptimizationGoal, Tool, ToolInvocation,
-           CommandQueue, ToolArgs};
+use util::{EhMode, OptimizationGoal, Tool, ToolInvocation, CommandQueue, ToolArgs,
+           process_invocation_args, regex, };
 use util::{need_nacl_toolchain};
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 use util::command_queue::RunState;
 
 #[macro_use]
-extern crate util;
+extern crate wasm_driver_utils as util;
 #[macro_use]
 extern crate lazy_static;
-extern crate regex;
-extern crate tempdir;
 
 extern crate ld_driver;
 
@@ -668,9 +664,9 @@ BASIC OPTIONS:
     args.extend(i);
     args.push("-target".to_string());
     args.push("wasm32-unknown-unknown-wasm".to_string());
-    queue.enqueue_tool(Some("linker"),
-                       ld, args, false,
-                       None::<Vec<TempDir>>)?;
+
+    process_invocation_args(&mut ld, args, true)?;
+    queue.enqueue_simple_tool(Some("linker"), ld);
     Ok(())
   }
 
@@ -728,9 +724,7 @@ impl Tool for Invocation {
       let mut clang_ver = self.clang_base_cmd();
       self.clang_add_std_args(&mut clang_ver);
       clang_ver.arg("-v");
-      queue.enqueue_external(Some("clang"), clang_ver,
-                             None, true,
-                             None::<Vec<TempDir>>);
+      queue.enqueue_simple_external(Some("clang"), clang_ver, None);
       return Ok(());
     }
 

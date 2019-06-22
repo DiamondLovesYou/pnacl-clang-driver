@@ -7,15 +7,13 @@ use std::borrow::Cow;
 use std::fmt;
 
 use util::{ToolArgs, Tool, ToolInvocation, CommandQueue,
-           CreateIfNotExists, };
+           CreateIfNotExists, regex, };
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
-extern crate regex;
 #[macro_use]
-extern crate util;
+extern crate wasm_driver_utils as util;
 #[macro_use]
 extern crate lazy_static;
-extern crate tempdir;
 
 const CRATE_ROOT: &'static str = env!("CARGO_MANIFEST_DIR");
 fn get_cmake_modules_dir() -> PathBuf {
@@ -169,7 +167,6 @@ impl Tool for Invocation {
     -> Result<(), Box<Error>>
   {
     use std::process::Command;
-    use tempdir::TempDir;
 
     let mut cmd = Command::new("cmake");
     self.tc.set_envs(&mut cmd);
@@ -191,8 +188,7 @@ impl Tool for Invocation {
       cmd.arg(format!("{}", arg));
     }
 
-    queue.enqueue_external(Some("cmake"), cmd,
-                           None, false, None::<Vec<TempDir>>);
+    queue.enqueue_simple_external(Some("cmake"), cmd, None);
 
     Ok(())
   }

@@ -9,7 +9,7 @@ exclude = ["*.iml", ".idea"]
 lazy_static = "*"
 regex = "*"
 
-[dependencies.util]
+[dependencies.wasm-driver-util]
 path = "../util"
 
 [lib]

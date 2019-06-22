@@ -1,8 +1,8 @@
 [package]
 license = "MIT"
-name = "clang-driver"
+name = "wasm-clang-driver"
 repository = ""
-version = "0.0.0"
+version = "0.1.0"
 exclude = ["*.iml", ".idea"]
 
 [[bin]]
@@ -14,18 +14,16 @@ name = "wasm-clangxx"
 path = "src/main.rs"
 
 [dependencies]
-lazy_static = "1.0"
-regex = "*"
-tempdir = "0.3.5"
-env_logger = "0.6.1"
+lazy_static = { version = "1.0", registry = "crates-io" }
+env_logger = { version = "0.6.1", registry = "crates-io" }
 
-[dependencies.ld-driver]
+[dependencies.wasm-ld-driver]
 path = "../ld"
 version = "*"
 
-[dependencies.util]
+[dependencies.wasm-driver-utils]
 path = "../util"
-version = "*"
+version = "1.0.0"
 
 [lib]
 name = "clang_driver"

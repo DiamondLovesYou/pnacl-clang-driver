@@ -1,15 +1,13 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-extern crate regex;
-
 #[macro_use]
 extern crate util;
 #[macro_use]
 extern crate lazy_static;
 
-use util::{Tool, ToolInvocation, CommandQueue, ToolArgs};
-use util::process_invocation_args;
+use util::{Tool, ToolInvocation, CommandQueue, ToolArgs, regex,
+           process_invocation_args, };
 
 #[derive(Debug)]
 struct Test {

@@ -1,6 +1,6 @@
 [package]
 authors = ["Richard Diamond <wichard@vitalitystudios.com>"]
-name = "cmake-driver"
+name = "wasm-cmake-driver"
 version = "0.1.0"
 exclude = ["*.iml", ".idea"]
 
@@ -9,14 +9,12 @@ name = "wasm-cmake"
 path = "src/main.rs"
 
 [dependencies]
-lazy_static = "1.0"
-regex = "*"
-tempdir = "0.3.5"
-env_logger = "0.6.1"
+lazy_static = { version = "1.0", registry = "crates-io" }
+env_logger = { version = "0.6.1", registry = "crates-io" }
 
-[dependencies.util]
-optional = false
+[dependencies.wasm-driver-utils]
 path = "../util"
+version = "1.0.0"
 
 [lib]
 name = "cmake_driver"

@@ -1,7 +1,7 @@
 [package]
 build = "src/build.rs"
 license = "MIT"
-name = "util"
+name = "wasm-driver-utils"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "1.0.0"
 exclude = ["*.iml", ".idea"]

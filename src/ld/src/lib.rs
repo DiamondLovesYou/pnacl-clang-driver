@@ -2,15 +2,13 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use util::{Arch, CommandQueue};
+use util::{Arch, CommandQueue, regex, };
 use util::toolchain::{WasmToolchain, WasmToolchainTool, };
 
 pub use util::ldtools::{Input, };
 
-extern crate regex;
-#[macro_use] extern crate util;
+#[macro_use] extern crate wasm_driver_utils as util;
 #[macro_use] extern crate lazy_static;
-extern crate tempdir;
 
 #[derive(Clone, Debug)]
 pub struct Invocation {
@@ -719,10 +717,33 @@ fn add_input_flag<'str>(this: &mut Invocation,
   Ok(())
 }
 
-argument!(impl AS_NEEDED_FLAG where { Some(r"^(-(-no)?-as-needed)$"), None } for Invocation => Some(add_input_flag));
-argument!(impl GROUP_FLAG where { Some(r"^(--(start|end)-group)$"), None } for Invocation => Some(add_input_flag));
-argument!(impl WHOLE_ARCHIVE_FLAG where { Some(r"^(-?-(no-)whole-archive)$"), None } for Invocation => Some(add_input_flag));
-argument!(impl LINKAGE_FLAG where { Some(r"^(-B(static|dynamic))$"), None } for Invocation => Some(add_input_flag));
+tool_argument!(GROUP_FLAG: Invocation = { Some(r"^(--(start|end)-group)$"), None };
+               fn add_group_flag(this, single, cap) { add_input_flag(this, single, cap) });
+tool_argument!(LINKAGE_FLAG: Invocation = { Some(r"^(-B(static|dynamic))$"), None };
+               fn add_linkage_flag(this, single, cap) { add_input_flag(this, single, cap) });
+
+tool_argument! {
+  pub AS_NEEDED_FLAG: Invocation = simple_no_flag(b) "as-needed" =>
+  fn as_needed_arg(this) {
+    let flag = if b {
+      "--as-needed"
+    } else {
+      "--no-as-needed"
+    };
+    this.add_input(Input::Flag(flag.into()))?;
+  }
+}
+tool_argument! {
+  pub WHOLE_ARCHIVE_FLAG: Invocation = simple_no_flag(b) "whole-archive" =>
+  fn whole_archive_arg(this) {
+    let flag = if b {
+      "--whole-archive"
+    } else {
+      "--no-whole-archive"
+    };
+    this.add_input(Input::Flag(flag.into()))?;
+  }
+}
 
 tool_argument!(UNDEFINED: Invocation = { Some(r"^-(-undefined=|u)(.+)$"), Some(r"^-u$") };
                fn add_undefined(_this, single, cap) {
