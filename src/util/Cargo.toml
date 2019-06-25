@@ -5,6 +5,7 @@ name = "wasm-driver-utils"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
 version = "1.0.0"
 exclude = ["*.iml", ".idea"]
+description = "A CLI tool utility crate I keep finding myself using for new things. Use at your own peril."
 
 [build-dependencies]
 regex = { version = "1.1.7", registry = "crates-io" }
