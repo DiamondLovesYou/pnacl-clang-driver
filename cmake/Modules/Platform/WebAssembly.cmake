@@ -104,7 +104,7 @@ if (EMSCRIPTEN_FORCE_COMPILERS)
 		                RESULT_VARIABLE _cmake_compiler_result
 		                OUTPUT_VARIABLE _cmake_compiler_output
 		                ERROR_VARIABLE _cmake_compiler_output)
-		if (NOT _cmake_compiler_result EQUAL 0)
+		if (NOT _cmake_compiler_result EQUAL 1)
 			message(FATAL_ERROR "Failed to fetch compiler version information with command \"'${CMAKE_C_COMPILER}' -v\"! Process returned with error code ${_cmake_compiler_result}.")
 		endif()
 		string(REGEX MATCH "clang version ([0-9\.]+)"
