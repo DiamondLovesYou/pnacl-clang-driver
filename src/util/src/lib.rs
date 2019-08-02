@@ -1,6 +1,6 @@
 #![feature(trace_macros)]
 #![feature(box_syntax)]
-#![feature(fnbox, fn_traits, unboxed_closures)]
+#![feature(fn_traits, unboxed_closures)]
 #![cfg_attr(test, feature(set_stdio))]
 
 use std::borrow::Cow;
