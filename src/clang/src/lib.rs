@@ -729,10 +729,13 @@ impl Tool for Invocation {
     }
 
     // force -o if -c is used and -o is not given (zlib's configure does this shit).
+    // libtool also does it. smile.
     if let Some(GccMode::Dashc) = self.gcc_mode {
       if self.output.is_none() {
         if let Some(&(ref path, _)) = self.inputs.iter().next() {
-          self.output = Some(path.with_extension("o"));
+          if let Some(file_name) = path.file_name().map(Path::new) {
+            self.output = Some(file_name.with_extension("o"));
+          }
         }
       }
     }
