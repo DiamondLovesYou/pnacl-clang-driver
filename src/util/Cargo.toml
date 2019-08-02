@@ -3,7 +3,7 @@ build = "src/build.rs"
 license = "MIT"
 name = "wasm-driver-utils"
 repository = "https://github.com/DiamondLovesYou/pnacl-clang-driver"
-version = "1.0.0"
+version = "1.0.1"
 exclude = ["*.iml", ".idea"]
 description = "A CLI tool utility crate I keep finding myself using for new things. Use at your own peril."
 
