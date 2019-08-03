@@ -58,6 +58,7 @@ pub struct Invocation {
   pub import_table: bool,
   pub growable_table_import: bool,
 
+  pub trace: bool,
   pub verbose: bool,
 
   pub search_paths: Vec<PathBuf>,
@@ -127,6 +128,7 @@ impl Invocation {
       import_table: false,
       growable_table_import: false,
 
+      trace: false,
       verbose: false,
 
       search_paths: Default::default(),
@@ -354,6 +356,7 @@ impl util::ToolInvocation for Invocation {
           IMPORT_TABLE,
           IMPORT_MEMORY,
           GLOBAL_BASE,
+          TRACE,
           RELOCATABLE,
           VERBOSE,
           GROWABLE_TABLE_IMPORT,
@@ -376,6 +379,9 @@ impl util::Tool for Invocation {
 
     let mut cmd = Command::new(self.tc.llvm_tool("wasm-ld"));
     cmd.arg("--modkit-loader");
+    if self.trace {
+      cmd.arg("--trace");
+    }
 
     if self.relocatable {
       cmd.arg("--relocatable");
@@ -557,7 +563,12 @@ tool_argument!(STATIC: Invocation = { Some(r"-static"), None };
                    Ok(())
                });
 
-
+tool_argument! {
+  pub TRACE: Invocation = simple_no_flag(b) "trace" =>
+  fn trace_arg1(this) {
+    this.trace = b;
+  }
+}
 tool_argument! {
   pub RELOCATABLE: Invocation = simple_no_flag(b) "relocatable" =>
   fn relocatable_arg1(this) {
